@@ -1,0 +1,42 @@
+# Build outputs
+**/bin
+**/obj
+**/out
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*.user
+*.suo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Environment & Secrets
+.env
+*.env
+appsettings.Development.json
+*-firebase-adminsdk-*.json
+*credentials*.json
+*serviceaccount*.json
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Keys
+keys/
+
+# Misc
+*.md
+*.log
+Dockerfile*
+docker-compose*
