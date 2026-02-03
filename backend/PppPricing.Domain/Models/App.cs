@@ -18,6 +18,9 @@ public class App
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
+    // Pricing index preference for PPP calculations
+    public PricingIndexType PreferredIndexType { get; set; } = PricingIndexType.BigMac;
+
     // Navigation properties
     public User User { get; set; } = null!;
     public StoreConnection StoreConnection { get; set; } = null!;

@@ -7,5 +7,11 @@ public class PppMultiplier
     public string? CountryName { get; set; }
     public decimal Multiplier { get; set; }  // e.g., 0.45 for 45% of base price
     public string? Source { get; set; }       // 'big_mac_index', 'world_bank', 'custom'
+    public PricingIndexType IndexType { get; set; } = PricingIndexType.BigMac;
+    public DateTime DataDate { get; set; }    // When the source data was published
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    // User-specific custom multipliers (null = system-wide multiplier)
+    public Guid? UserId { get; set; }
+    public User? User { get; set; }
 }
