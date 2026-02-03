@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using PppPricing.API.Data;
 
@@ -10,9 +11,11 @@ using PppPricing.API.Data;
 namespace PppPricing.API.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260203173612_AddUserRoleAndMultiplierOwnership")]
+    partial class AddUserRoleAndMultiplierOwnership
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.2");
@@ -41,9 +44,6 @@ namespace PppPricing.API.Migrations
 
                     b.Property<string>("PackageName")
                         .HasColumnType("TEXT");
-
-                    b.Property<int>("PreferredIndexType")
-                        .HasColumnType("INTEGER");
 
                     b.Property<Guid>("StoreConnectionId")
                         .HasColumnType("TEXT");
@@ -75,12 +75,6 @@ namespace PppPricing.API.Migrations
                     b.Property<string>("CountryName")
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTime>("DataDate")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("IndexType")
-                        .HasColumnType("INTEGER");
-
                     b.Property<decimal>("Multiplier")
                         .HasColumnType("TEXT");
 
@@ -101,7 +95,7 @@ namespace PppPricing.API.Migrations
 
                     b.HasIndex("UserId");
 
-                    b.HasIndex("RegionCode", "UserId", "IndexType")
+                    b.HasIndex("RegionCode", "UserId")
                         .IsUnique();
 
                     b.ToTable("PppMultipliers");
@@ -154,57 +148,6 @@ namespace PppPricing.API.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("PriceChanges");
-                });
-
-            modelBuilder.Entity("PppPricing.Domain.Models.PricingIndexRawData", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CountryName")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CurrencyCode")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("DataDate")
-                        .HasColumnType("TEXT");
-
-                    b.Property<decimal?>("ExchangeRate")
-                        .HasColumnType("TEXT");
-
-                    b.Property<decimal?>("HourlyWage")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("ImportedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("IndexType")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<decimal>("LocalPrice")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("PlanType")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("RegionCode")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<decimal>("UsdPrice")
-                        .HasColumnType("TEXT");
-
-                    b.Property<decimal?>("WorkingHours")
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("IndexType", "RegionCode", "PlanType")
-                        .IsUnique();
-
-                    b.ToTable("PricingIndexRawData");
                 });
 
             modelBuilder.Entity("PppPricing.Domain.Models.StoreConnection", b =>
