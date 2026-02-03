@@ -36,7 +36,7 @@ export default function DashboardPage() {
           regions: 175, // All supported regions
         });
       } catch (error) {
-        console.error("Failed to fetch stats:", error);
+        console.error("Failed to fetch stats:", error instanceof Error ? error.message : "Unknown error");
       } finally {
         setLoading(false);
       }

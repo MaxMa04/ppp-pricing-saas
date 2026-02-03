@@ -6,27 +6,37 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { createApi } from "@/lib/api/client";
 import { getCurrentUserToken } from "@/lib/firebase/auth";
-import { AppWindow, ChevronRight } from "lucide-react";
+import { AppWindow, ChevronRight, AlertCircle, Plus } from "lucide-react";
 
 export default function AppsPage() {
   const [apps, setApps] = useState<any[]>([]);
+  const [connections, setConnections] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchApps = async () => {
+    const fetchData = async () => {
       try {
         const api = createApi(getCurrentUserToken);
-        const data = await api.apps.list();
-        setApps(data);
-      } catch (error) {
-        console.error("Failed to fetch apps:", error);
+        const [appsData, connectionsData] = await Promise.all([
+          api.apps.list(),
+          api.connections.list(),
+        ]);
+        setApps(appsData);
+        setConnections(connectionsData);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        console.error("Failed to fetch apps:", message);
+        setError(message);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchApps();
+    fetchData();
   }, []);
+
+  const hasConnectedStore = connections.length > 0;
 
   if (loading) {
     return (
@@ -45,12 +55,36 @@ export default function AppsPage() {
             Manage your connected applications
           </p>
         </div>
-        <Link href="/dashboard/connections">
-          <Button>Connect Store</Button>
-        </Link>
+        <div className="flex gap-2">
+          {hasConnectedStore && (
+            <Link href="/dashboard/connections/import-apps">
+              <Button>
+                <Plus className="mr-2 h-4 w-4" />
+                Add App
+              </Button>
+            </Link>
+          )}
+          <Link href="/dashboard/connections">
+            <Button variant={hasConnectedStore ? "outline" : "default"}>
+              {hasConnectedStore ? "Manage Stores" : "Connect Store"}
+            </Button>
+          </Link>
+        </div>
       </div>
 
-      {apps.length === 0 ? (
+      {error && (
+        <Card className="border-destructive">
+          <CardContent className="flex items-center gap-4 py-4">
+            <AlertCircle className="h-6 w-6 text-destructive" />
+            <div>
+              <p className="font-medium text-destructive">Failed to load apps</p>
+              <p className="text-sm text-muted-foreground">{error}</p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {!error && apps.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <AppWindow className="h-12 w-12 text-muted-foreground" />
@@ -58,9 +92,14 @@ export default function AppsPage() {
             <p className="mt-2 text-center text-sm text-muted-foreground">
               Connect your App Store or Google Play account to import your apps.
             </p>
-            <Link href="/dashboard/connections" className="mt-4">
-              <Button>Connect Store</Button>
-            </Link>
+            <div className="mt-4 flex gap-2">
+              <Link href="/dashboard/connections">
+                <Button variant="outline">Connect Store</Button>
+              </Link>
+              <Link href="/dashboard/connections/import-apps">
+                <Button>Import Apps</Button>
+              </Link>
+            </div>
           </CardContent>
         </Card>
       ) : (
