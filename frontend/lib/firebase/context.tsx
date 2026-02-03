@@ -49,7 +49,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             localStorage.setItem("internalUserId", data.id);
           }
         } catch (error) {
-          console.error("Failed to sync user with backend:", error);
+          console.error("Failed to sync user with backend:", error instanceof Error ? error.message : "Unknown error");
         }
       } else {
         setInternalUserId(null);

@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PPP Pricing - Adjust Subscription Prices by Purchasing Power",
+  title: "PriceParity - Adjust Subscription Prices by Purchasing Power",
   description: "Automatically adjust your App Store and Google Play subscription prices based on Purchasing Power Parity.",
 };
 

@@ -49,7 +49,7 @@ export function RegisterForm() {
       <CardHeader className="text-center">
         <CardTitle className="text-2xl">Create an account</CardTitle>
         <CardDescription>
-          Get started with PPP Pricing
+          Get started with PriceParity
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
