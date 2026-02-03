@@ -1,0 +1,6 @@
+@PppPricing.API_HostAddress = http://localhost:5192
+
+GET {{PppPricing.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
