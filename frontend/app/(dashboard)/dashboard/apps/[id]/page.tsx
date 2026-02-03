@@ -1,20 +1,32 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { createApi } from "@/lib/api/client";
 import { getCurrentUserToken } from "@/lib/firebase/auth";
-import { ArrowLeft, ChevronRight, TrendingUp } from "lucide-react";
+import { ArrowLeft, ChevronRight, TrendingUp, Settings, Loader2, Trash2, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
+
+const INDEX_OPTIONS = [
+  { value: 0, label: "Big Mac Index", description: "Classic PPP indicator" },
+  { value: 1, label: "Netflix Index", description: "Digital goods PPP" },
+  { value: 2, label: "Working Hours", description: "Purchasing power in work time" },
+];
 
 export default function AppDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const id = params.id as string;
 
   const [app, setApp] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [updatingIndex, setUpdatingIndex] = useState(false);
+  const [showIndexDropdown, setShowIndexDropdown] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
     const fetchApp = async () => {
@@ -23,7 +35,7 @@ export default function AppDetailPage() {
         const data = await api.apps.get(id);
         setApp(data);
       } catch (error) {
-        console.error("Failed to fetch app:", error);
+        console.error("Failed to fetch app:", error instanceof Error ? error.message : "Unknown error");
       } finally {
         setLoading(false);
       }
@@ -31,6 +43,74 @@ export default function AppDetailPage() {
 
     fetchApp();
   }, [id]);
+
+  const handleIndexChange = async (indexType: number) => {
+    setUpdatingIndex(true);
+    try {
+      const api = createApi(getCurrentUserToken);
+      const result = await api.apps.updatePreferredIndex(id, indexType);
+      setApp((prev: any) => ({
+        ...prev,
+        preferredIndexType: result.preferredIndexType,
+        preferredIndexTypeValue: result.preferredIndexTypeValue,
+      }));
+      setShowIndexDropdown(false);
+      toast.success(`Pricing index updated to ${INDEX_OPTIONS.find((o) => o.value === indexType)?.label}`);
+    } catch (error) {
+      console.error("Failed to update index:", error);
+      toast.error("Failed to update pricing index");
+    } finally {
+      setUpdatingIndex(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!confirm(`Are you sure you want to delete "${app.appName}"? This will also delete all subscriptions and price data.`)) {
+      return;
+    }
+
+    setDeleting(true);
+    try {
+      const api = createApi(getCurrentUserToken);
+      await api.apps.delete(id);
+      toast.success("App deleted successfully");
+      router.push("/dashboard/apps");
+    } catch (error) {
+      console.error("Failed to delete app:", error);
+      toast.error("Failed to delete app");
+      setDeleting(false);
+    }
+  };
+
+  const handleSyncSubscriptions = async () => {
+    setSyncing(true);
+    try {
+      const api = createApi(getCurrentUserToken);
+      let result;
+
+      if (app.storeType === 0) {
+        // Google Play
+        result = await api.googlePlay.syncSubscriptions(app.packageName);
+      } else {
+        // App Store
+        result = await api.appStore.syncSubscriptions(app.appStoreId);
+      }
+
+      if (result.success) {
+        toast.success(`Synced ${result.subscriptionCount} subscriptions with ${result.priceCount} regional prices`);
+        // Refresh app data
+        const updatedApp = await api.apps.get(id);
+        setApp(updatedApp);
+      } else {
+        toast.error("Failed to sync subscriptions");
+      }
+    } catch (error) {
+      console.error("Failed to sync subscriptions:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to sync subscriptions");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -47,6 +127,8 @@ export default function AppDetailPage() {
       </div>
     );
   }
+
+  const currentIndex = INDEX_OPTIONS.find((o) => o.value === app.preferredIndexTypeValue) || INDEX_OPTIONS[0];
 
   return (
     <div className="space-y-8">
@@ -77,15 +159,95 @@ export default function AppDetailPage() {
         </div>
       </div>
 
+      {/* Pricing Index Selection */}
       <Card>
         <CardHeader>
-          <CardTitle>Subscriptions</CardTitle>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Settings className="h-5 w-5" />
+                Pricing Index
+              </CardTitle>
+              <CardDescription>
+                Choose which PPP index to use for price calculations
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="relative">
+            <button
+              onClick={() => setShowIndexDropdown(!showIndexDropdown)}
+              disabled={updatingIndex}
+              className="w-full flex items-center justify-between p-4 border rounded-lg hover:bg-muted/50 transition-colors"
+            >
+              <div className="text-left">
+                <div className="font-medium">{currentIndex.label}</div>
+                <div className="text-sm text-muted-foreground">{currentIndex.description}</div>
+              </div>
+              {updatingIndex ? (
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              ) : (
+                <ChevronRight className={`h-5 w-5 text-muted-foreground transition-transform ${showIndexDropdown ? "rotate-90" : ""}`} />
+              )}
+            </button>
+
+            {showIndexDropdown && !updatingIndex && (
+              <div className="absolute top-full left-0 right-0 mt-2 border rounded-lg bg-background shadow-lg z-10">
+                {INDEX_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => handleIndexChange(option.value)}
+                    className={`w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors first:rounded-t-lg last:rounded-b-lg ${
+                      option.value === app.preferredIndexTypeValue ? "bg-muted/30" : ""
+                    }`}
+                  >
+                    <div className="text-left">
+                      <div className="font-medium">{option.label}</div>
+                      <div className="text-sm text-muted-foreground">{option.description}</div>
+                    </div>
+                    {option.value === app.preferredIndexTypeValue && (
+                      <span className="text-xs bg-primary text-primary-foreground px-2 py-1 rounded">Current</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle>Subscriptions</CardTitle>
+            <Button
+              onClick={handleSyncSubscriptions}
+              disabled={syncing}
+              variant="outline"
+              size="sm"
+            >
+              {syncing ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Syncing...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Sync Subscriptions
+                </>
+              )}
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           {app.subscriptions?.length === 0 ? (
-            <p className="text-center text-muted-foreground py-8">
-              No subscriptions found. Sync your app to import subscriptions.
-            </p>
+            <div className="text-center py-8">
+              <p className="text-muted-foreground mb-4">
+                No subscriptions found. Click &quot;Sync Subscriptions&quot; to import your in-app purchases.
+              </p>
+            </div>
           ) : (
             <div className="divide-y">
               {app.subscriptions?.map((sub: any) => (
@@ -110,6 +272,35 @@ export default function AppDetailPage() {
               ))}
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Danger Zone */}
+      <Card className="border-destructive/50">
+        <CardHeader>
+          <CardTitle className="text-destructive">Danger Zone</CardTitle>
+          <CardDescription>
+            Permanently delete this app and all its data
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            variant="destructive"
+            onClick={handleDelete}
+            disabled={deleting}
+          >
+            {deleting ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Deleting...
+              </>
+            ) : (
+              <>
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete App
+              </>
+            )}
+          </Button>
         </CardContent>
       </Card>
     </div>
