@@ -65,27 +65,34 @@ A SaaS tool that allows app developers to automatically adjust their subscriptio
 └── .gitignore
 ```
 
+## Ports
+
+| Component | Port | Config Location |
+|-----------|------|-----------------|
+| Frontend | 3009 | `frontend/package.json` |
+| Backend | 5004 | `backend/PppPricing.API/appsettings.json` |
+
 ## Quick Start
 
 ### Frontend
 ```bash
 cd frontend
 npm install
-npm run dev          # http://localhost:3000
+npm run dev          # http://localhost:3009
 ```
 
 ### Backend
 ```bash
 cd backend
 dotnet restore
-dotnet run --project PppPricing.API   # http://localhost:5000
+dotnet run --project PppPricing.API   # http://localhost:5004
 ```
 
 ## Environment Variables
 
 ### Frontend (.env.local)
 ```env
-NEXT_PUBLIC_API_URL=http://localhost:5000
+NEXT_PUBLIC_API_URL=http://localhost:5004
 NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyDE2Snk2gr1ZWLaTxJSHbyJLENy7_Kw33k
 NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=pricingsaas-a121a.firebaseapp.com
 NEXT_PUBLIC_FIREBASE_PROJECT_ID=pricingsaas-a121a

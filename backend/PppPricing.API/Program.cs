@@ -27,8 +27,8 @@ builder.Services.AddCors(options =>
     options.AddPolicy("PppPricingPolicy", policy =>
     {
         policy.WithOrigins(
-                "http://localhost:3000",
-                "https://localhost:3000"
+                "http://localhost:3009",
+                "https://localhost:3009"
             )
             .AllowAnyMethod()
             .AllowAnyHeader()
