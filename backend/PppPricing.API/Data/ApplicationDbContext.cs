@@ -17,6 +17,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<SubscriptionPrice> SubscriptionPrices => Set<SubscriptionPrice>();
     public DbSet<PppMultiplier> PppMultipliers => Set<PppMultiplier>();
     public DbSet<PriceChange> PriceChanges => Set<PriceChange>();
+    public DbSet<PricingIndexRawData> PricingIndexRawData => Set<PricingIndexRawData>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -80,7 +81,20 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<PppMultiplier>(entity =>
         {
             entity.HasKey(e => e.Id);
-            entity.HasIndex(e => e.RegionCode).IsUnique();
+            // Unique constraint: RegionCode + UserId + IndexType (allows same region for different indexes)
+            entity.HasIndex(e => new { e.RegionCode, e.UserId, e.IndexType }).IsUnique();
+            entity.HasOne(e => e.User)
+                .WithMany(u => u.CustomMultipliers)
+                .HasForeignKey(e => e.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // PricingIndexRawData
+        modelBuilder.Entity<PricingIndexRawData>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            // Unique constraint: IndexType + RegionCode + PlanType (for Netflix variants)
+            entity.HasIndex(e => new { e.IndexType, e.RegionCode, e.PlanType }).IsUnique();
         });
 
         // PriceChange
