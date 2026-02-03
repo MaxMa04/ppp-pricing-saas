@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PppPricing.API.Data;
+using PppPricing.Domain.Models;
 
 namespace PppPricing.API.Controllers;
 
@@ -71,6 +72,8 @@ public class AppsController : ControllerBase
                 a.IconUrl,
                 a.CreatedAt,
                 a.UpdatedAt,
+                PreferredIndexType = a.PreferredIndexType.ToString(),
+                PreferredIndexTypeValue = (int)a.PreferredIndexType,
                 Subscriptions = a.Subscriptions.Select(s => new
                 {
                     s.Id,
@@ -113,4 +116,67 @@ public class AppsController : ControllerBase
 
         return Ok(subscriptions);
     }
+
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> DeleteApp(Guid id)
+    {
+        var userId = await GetUserIdAsync();
+        if (userId == null) return Unauthorized();
+
+        var app = await _context.Apps
+            .Include(a => a.Subscriptions)
+                .ThenInclude(s => s.Prices)
+            .FirstOrDefaultAsync(a => a.Id == id && a.UserId == userId);
+
+        if (app == null) return NotFound();
+
+        // Delete all related data
+        foreach (var subscription in app.Subscriptions)
+        {
+            _context.SubscriptionPrices.RemoveRange(subscription.Prices);
+        }
+        _context.Subscriptions.RemoveRange(app.Subscriptions);
+        _context.Apps.Remove(app);
+
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("User {UserId} deleted app {AppId} ({AppName})", userId, id, app.AppName);
+
+        return NoContent();
+    }
+
+    [HttpPut("{id}/preferred-index")]
+    public async Task<IActionResult> UpdatePreferredIndex(Guid id, [FromBody] UpdatePreferredIndexRequest request)
+    {
+        var userId = await GetUserIdAsync();
+        if (userId == null) return Unauthorized();
+
+        var app = await _context.Apps.FirstOrDefaultAsync(a => a.Id == id && a.UserId == userId);
+        if (app == null) return NotFound();
+
+        if (!Enum.IsDefined(typeof(PricingIndexType), request.PreferredIndexType))
+        {
+            return BadRequest(new { error = "Invalid index type" });
+        }
+
+        app.PreferredIndexType = (PricingIndexType)request.PreferredIndexType;
+        app.UpdatedAt = DateTime.UtcNow;
+
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("User {UserId} updated preferred index for app {AppId} to {IndexType}",
+            userId, id, app.PreferredIndexType);
+
+        return Ok(new
+        {
+            app.Id,
+            PreferredIndexType = app.PreferredIndexType.ToString(),
+            PreferredIndexTypeValue = (int)app.PreferredIndexType
+        });
+    }
+}
+
+public class UpdatePreferredIndexRequest
+{
+    public int PreferredIndexType { get; set; }
 }
