@@ -93,12 +93,12 @@ dotnet run --project PppPricing.API   # http://localhost:5004
 ### Frontend (.env.local)
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:5004
-NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyDE2Snk2gr1ZWLaTxJSHbyJLENy7_Kw33k
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=pricingsaas-a121a.firebaseapp.com
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=pricingsaas-a121a
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=pricingsaas-a121a.firebasestorage.app
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=419254750705
-NEXT_PUBLIC_FIREBASE_APP_ID=1:419254750705:web:de4ea7f4ab69004d6a4850
+NEXT_PUBLIC_FIREBASE_API_KEY=<your-firebase-api-key>
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=<your-project-id>.firebaseapp.com
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=<your-project-id>
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=<your-project-id>.firebasestorage.app
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=<your-sender-id>
+NEXT_PUBLIC_FIREBASE_APP_ID=<your-app-id>
 ```
 
 ### Backend (appsettings.json)
@@ -106,8 +106,8 @@ NEXT_PUBLIC_FIREBASE_APP_ID=1:419254750705:web:de4ea7f4ab69004d6a4850
 {
   "DatabasePath": "ppppricing.db",
   "Firebase": {
-    "ProjectId": "pricingsaas-a121a",
-    "CredentialPath": "../pricingsaas-a121a-firebase-adminsdk-fbsvc-78d0dde54b.json"
+    "ProjectId": "<your-project-id>",
+    "CredentialPath": ""  // Set via GOOGLE_APPLICATION_CREDENTIALS env var
   }
 }
 ```

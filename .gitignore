@@ -51,3 +51,16 @@ coverage/
 # Misc
 *.pem
 .vercel
+
+# Additional security patterns
+*.json.bak
+*credentials*.json
+*serviceaccount*.json
+*-adminsdk-*.json
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Environment
+.env
