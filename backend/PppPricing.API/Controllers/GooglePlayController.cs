@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using PppPricing.API.Data;
+using PppPricing.API.Services;
 using PppPricing.Domain.Models;
 using System.Text.Json;
 
@@ -14,17 +16,23 @@ public class GooglePlayController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly ILogger<GooglePlayController> _logger;
     private readonly HttpClient _httpClient;
+    private readonly IMemoryCache _cache;
+    private readonly ICredentialEncryptionService _encryptionService;
 
     public GooglePlayController(
         ApplicationDbContext context,
         IConfiguration configuration,
         ILogger<GooglePlayController> logger,
-        IHttpClientFactory httpClientFactory)
+        IHttpClientFactory httpClientFactory,
+        IMemoryCache cache,
+        ICredentialEncryptionService encryptionService)
     {
         _context = context;
         _configuration = configuration;
         _logger = logger;
         _httpClient = httpClientFactory.CreateClient();
+        _cache = cache;
+        _encryptionService = encryptionService;
     }
 
     private async Task<Guid?> GetUserIdAsync()
@@ -37,18 +45,36 @@ public class GooglePlayController : ControllerBase
     }
 
     [HttpGet("auth/url")]
-    public IActionResult GetAuthUrl()
+    public async Task<IActionResult> GetAuthUrl()
     {
+        _logger.LogInformation("GetAuthUrl called");
+
+        var userId = await GetUserIdAsync();
+        if (userId == null)
+        {
+            _logger.LogWarning("GetAuthUrl: User not authenticated");
+            return Unauthorized();
+        }
+
+        _logger.LogInformation("GetAuthUrl: User {UserId} requesting OAuth URL", userId);
+
         var clientId = _configuration["Google:ClientId"];
         var redirectUri = _configuration["Google:RedirectUri"] ?? $"{Request.Scheme}://{Request.Host}/api/google-play/auth/callback";
 
+        _logger.LogDebug("Google OAuth config - ClientId present: {HasClientId}, RedirectUri: {RedirectUri}",
+            !string.IsNullOrEmpty(clientId), redirectUri);
+
         if (string.IsNullOrEmpty(clientId))
         {
+            _logger.LogError("Google OAuth not configured - ClientId is missing");
             return BadRequest(new { error = "Google OAuth not configured" });
         }
 
         var scope = "https://www.googleapis.com/auth/androidpublisher";
         var state = Guid.NewGuid().ToString();
+
+        // Store state in cache for CSRF validation (expires in 10 minutes)
+        _cache.Set($"oauth_state_{userId}", state, TimeSpan.FromMinutes(10));
 
         var authUrl = $"https://accounts.google.com/o/oauth2/v2/auth?" +
             $"client_id={Uri.EscapeDataString(clientId)}&" +
@@ -65,8 +91,26 @@ public class GooglePlayController : ControllerBase
     [HttpPost("auth/callback")]
     public async Task<IActionResult> HandleCallback([FromBody] OAuthCallbackRequest request)
     {
+        _logger.LogInformation("OAuth callback received");
+
         var userId = await GetUserIdAsync();
-        if (userId == null) return Unauthorized();
+        if (userId == null)
+        {
+            _logger.LogWarning("OAuth callback: User not authenticated");
+            return Unauthorized();
+        }
+
+        _logger.LogInformation("OAuth callback for user {UserId}, code length: {CodeLength}",
+            userId, request.Code?.Length ?? 0);
+
+        // Validate OAuth state parameter (CSRF protection)
+        var expectedState = _cache.Get<string>($"oauth_state_{userId}");
+        if (string.IsNullOrEmpty(expectedState) || request.State != expectedState)
+        {
+            _logger.LogWarning("OAuth state mismatch for user {UserId}", userId);
+            return BadRequest(new { error = "Invalid state parameter. Please try again." });
+        }
+        _cache.Remove($"oauth_state_{userId}");
 
         var clientId = _configuration["Google:ClientId"];
         var clientSecret = _configuration["Google:ClientSecret"];
@@ -92,16 +136,19 @@ public class GooglePlayController : ControllerBase
 
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogError("Failed to exchange OAuth code: {Response}", responseContent);
-            return BadRequest(new { error = "Failed to exchange authorization code" });
+            _logger.LogError("Failed to exchange OAuth code for user {UserId}. Status: {StatusCode}, Response: {Response}",
+                userId, response.StatusCode, responseContent);
+            return BadRequest(new { error = "Failed to exchange authorization code", details = responseContent });
         }
+
+        _logger.LogInformation("Token exchange successful for user {UserId}", userId);
 
         var tokenResponse = JsonSerializer.Deserialize<JsonElement>(responseContent);
         var accessToken = tokenResponse.GetProperty("access_token").GetString();
         var refreshToken = tokenResponse.TryGetProperty("refresh_token", out var rt) ? rt.GetString() : null;
         var expiresIn = tokenResponse.GetProperty("expires_in").GetInt32();
 
-        // Store connection (tokens should be encrypted in production)
+        // Store connection with encrypted tokens
         var connection = await _context.StoreConnections
             .FirstOrDefaultAsync(sc => sc.UserId == userId && sc.StoreType == StoreType.GooglePlay);
 
@@ -117,11 +164,11 @@ public class GooglePlayController : ControllerBase
             _context.StoreConnections.Add(connection);
         }
 
-        // In production, encrypt these tokens!
-        connection.GoogleAccessTokenEncrypted = System.Text.Encoding.UTF8.GetBytes(accessToken ?? "");
+        // Encrypt tokens before storing
+        connection.GoogleAccessTokenEncrypted = _encryptionService.Encrypt(accessToken ?? "");
         if (refreshToken != null)
         {
-            connection.GoogleRefreshTokenEncrypted = System.Text.Encoding.UTF8.GetBytes(refreshToken);
+            connection.GoogleRefreshTokenEncrypted = _encryptionService.Encrypt(refreshToken);
         }
         connection.GoogleTokenExpiry = DateTime.UtcNow.AddSeconds(expiresIn);
         connection.IsActive = true;
