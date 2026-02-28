@@ -1,5 +1,11 @@
 # PPP Pricing SaaS - Claude Code Documentation
 
+## Context Maintenance
+
+- Der operative Projektkontext wird in der zentralisierten `AGENTS.md`-Datei des jeweiligen Repositories gepflegt.
+- Wenn sich Architektur, Commands, Tech-Stack oder Agent-Regeln ändern, pflege diese Anpassungen primär in `AGENTS.md`.
+- `CLAUDE.md`/`Cloud.md` kann ergänzende Details enthalten, aber `AGENTS.md` ist die führende Quelle für Agenten-Kontext.
+
 ## Project Overview
 
 A SaaS tool that allows app developers to automatically adjust their subscription prices based on Purchasing Power Parity (PPP) / Big Mac Index for both Apple App Store and Google Play Store.
