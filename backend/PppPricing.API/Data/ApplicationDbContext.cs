@@ -81,8 +81,8 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<PppMultiplier>(entity =>
         {
             entity.HasKey(e => e.Id);
-            // Unique constraint: RegionCode + UserId + IndexType (allows same region for different indexes)
-            entity.HasIndex(e => new { e.RegionCode, e.UserId, e.IndexType }).IsUnique();
+            // Unique constraint: RegionCode + UserId + IndexType + PlanType (for Netflix plan variants)
+            entity.HasIndex(e => new { e.RegionCode, e.UserId, e.IndexType, e.PlanType }).IsUnique();
             entity.HasOne(e => e.User)
                 .WithMany(u => u.CustomMultipliers)
                 .HasForeignKey(e => e.UserId)

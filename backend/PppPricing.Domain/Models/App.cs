@@ -20,6 +20,7 @@ public class App
 
     // Pricing index preference for PPP calculations
     public PricingIndexType PreferredIndexType { get; set; } = PricingIndexType.BigMac;
+    public string PreferredNetflixPlan { get; set; } = "standard";
 
     // Navigation properties
     public User User { get; set; } = null!;

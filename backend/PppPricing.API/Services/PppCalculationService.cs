@@ -34,21 +34,6 @@ public class PppCalculationService : IPppCalculationService
         { "CL", "CLP" }, { "CO", "COP" }, { "AR", "ARS" }, { "PE", "PEN" },
     };
 
-    // Approximate exchange rates (in production, use a real exchange rate API)
-    private static readonly Dictionary<string, decimal> ExchangeRatesToUsd = new()
-    {
-        { "USD", 1.0m }, { "EUR", 0.92m }, { "GBP", 0.79m }, { "JPY", 149.5m },
-        { "CAD", 1.36m }, { "AUD", 1.53m }, { "CHF", 0.88m }, { "CNY", 7.24m },
-        { "INR", 83.4m }, { "BRL", 4.97m }, { "MXN", 17.15m }, { "ZAR", 18.6m },
-        { "KRW", 1330m }, { "SGD", 1.34m }, { "HKD", 7.82m }, { "SEK", 10.5m },
-        { "NOK", 10.7m }, { "DKK", 6.87m }, { "PLN", 4.0m }, { "TRY", 32.5m },
-        { "RUB", 92m }, { "THB", 35.5m }, { "IDR", 15700m }, { "MYR", 4.72m },
-        { "PHP", 56.2m }, { "VND", 24500m }, { "AED", 3.67m }, { "SAR", 3.75m },
-        { "ILS", 3.7m }, { "EGP", 30.9m }, { "NGN", 1550m }, { "KES", 157m },
-        { "CLP", 950m }, { "COP", 4000m }, { "ARS", 870m }, { "PEN", 3.72m },
-        { "NZD", 1.64m }, { "TWD", 31.8m },
-    };
-
     public PppCalculationService(ApplicationDbContext context, ILogger<PppCalculationService> logger)
     {
         _context = context;
@@ -57,9 +42,13 @@ public class PppCalculationService : IPppCalculationService
 
     public async Task<decimal> CalculatePppPrice(decimal basePrice, string baseCurrency, string targetRegion)
     {
+        var normalizedRegion = RegionCodeNormalizer.NormalizeToAlpha3(targetRegion) ?? targetRegion.ToUpperInvariant();
+
         // Get PPP multiplier for target region
         var multiplier = await _context.PppMultipliers
-            .Where(m => m.RegionCode == targetRegion.ToUpper())
+            .Where(m => m.RegionCode == normalizedRegion &&
+                        m.IndexType == PricingIndexType.BigMac &&
+                        m.PlanType == null)
             .Select(m => m.Multiplier)
             .FirstOrDefaultAsync();
 
@@ -173,17 +162,14 @@ public class PppCalculationService : IPppCalculationService
 
     private string GetCurrencyForRegion(string regionCode)
     {
-        return RegionToCurrency.GetValueOrDefault(regionCode.ToUpper(), "USD");
+        var alpha2 = RegionCodeNormalizer.NormalizeToAlpha2(regionCode) ?? regionCode.ToUpperInvariant();
+        return RegionToCurrency.GetValueOrDefault(alpha2, "USD");
     }
 
     private decimal GetExchangeRate(string fromCurrency, string toCurrency)
     {
         if (fromCurrency == toCurrency) return 1.0m;
-
-        var fromRate = ExchangeRatesToUsd.GetValueOrDefault(fromCurrency.ToUpper(), 1.0m);
-        var toRate = ExchangeRatesToUsd.GetValueOrDefault(toCurrency.ToUpper(), 1.0m);
-
-        return toRate / fromRate;
+        return CurrencyConversion.Convert(1m, fromCurrency, toCurrency);
     }
 
     private decimal RoundToLocalConvention(decimal price, string currency)

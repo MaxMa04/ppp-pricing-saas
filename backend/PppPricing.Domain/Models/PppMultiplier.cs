@@ -7,7 +7,9 @@ public class PppMultiplier
     public string? CountryName { get; set; }
     public decimal Multiplier { get; set; }  // e.g., 0.45 for 45% of base price
     public string? Source { get; set; }       // 'big_mac_index', 'world_bank', 'custom'
+    public string? CurrencyCode { get; set; }
     public PricingIndexType IndexType { get; set; } = PricingIndexType.BigMac;
+    public string? PlanType { get; set; }      // netflix plan: mobile/basic/standard/premium
     public DateTime DataDate { get; set; }    // When the source data was published
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 

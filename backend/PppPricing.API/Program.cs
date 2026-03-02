@@ -3,6 +3,7 @@ using Google.Apis.Auth.OAuth2;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using PppPricing.API.Configuration;
 using PppPricing.API.Data;
 using PppPricing.API.Middleware;
 using PppPricing.API.Services;
@@ -37,6 +38,8 @@ builder.Services.AddDataProtection()
 builder.Services.AddScoped<PppPricing.API.Services.IPppCalculationService, PppPricing.API.Services.PppCalculationService>();
 builder.Services.AddScoped<ICredentialEncryptionService, CredentialEncryptionService>();
 builder.Services.AddScoped<IPricingIndexImportService, PricingIndexImportService>();
+builder.Services.AddScoped<IEffectiveMultiplierService, EffectiveMultiplierService>();
+builder.Services.AddScoped<GoogleOAuthSettingsResolver>();
 
 // Configure Rate Limiting
 var rateLimitConfig = builder.Configuration.GetSection("RateLimiting");

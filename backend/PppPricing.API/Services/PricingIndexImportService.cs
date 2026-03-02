@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using PppPricing.API.Data;
 using PppPricing.Domain.Models;
@@ -9,7 +10,7 @@ namespace PppPricing.API.Services;
 public interface IPricingIndexImportService
 {
     Task<ImportResult> ImportBigMacIndexAsync();
-    Task<ImportResult> ImportNetflixIndexAsync(string planType = "standard");
+    Task<ImportResult> ImportNetflixIndexAsync(string? planType = null);
     Task<ImportResult> ImportWageDataAsync();
     Task<ImportResult> CalculateBigMacWorkingHoursAsync();
 }
@@ -21,30 +22,11 @@ public class PricingIndexImportService : IPricingIndexImportService
     private readonly ILogger<PricingIndexImportService> _logger;
 
     private const string BigMacCsvUrl = "https://raw.githubusercontent.com/TheEconomist/big-mac-data/master/output-data/big-mac-full-index.csv";
-    private const string NetflixJsonUrl = "https://raw.githubusercontent.com/tompec/netflix-prices/main/data/prices.json";
-
-    // ISO 3166-1 alpha-3 to alpha-2 mapping for Big Mac data
-    private static readonly Dictionary<string, string> Alpha3ToAlpha2 = new()
-    {
-        { "ARG", "AR" }, { "AUS", "AU" }, { "AUT", "AT" }, { "AZE", "AZ" },
-        { "BHR", "BH" }, { "BRA", "BR" }, { "GBR", "GB" }, { "CAN", "CA" },
-        { "CHL", "CL" }, { "CHN", "CN" }, { "COL", "CO" }, { "CRI", "CR" },
-        { "HRV", "HR" }, { "CZE", "CZ" }, { "DNK", "DK" }, { "EGY", "EG" },
-        { "EUZ", "EU" }, { "GTM", "GT" }, { "HND", "HN" }, { "HKG", "HK" },
-        { "HUN", "HU" }, { "IND", "IN" }, { "IDN", "ID" }, { "ISR", "IL" },
-        { "JPN", "JP" }, { "JOR", "JO" }, { "KWT", "KW" }, { "LBN", "LB" },
-        { "MYS", "MY" }, { "MEX", "MX" }, { "MDA", "MD" }, { "NIC", "NI" },
-        { "NOR", "NO" }, { "OMN", "OM" }, { "PAK", "PK" }, { "PER", "PE" },
-        { "PHL", "PH" }, { "POL", "PL" }, { "QAT", "QA" }, { "ROU", "RO" },
-        { "RUS", "RU" }, { "SAU", "SA" }, { "SGP", "SG" }, { "ZAF", "ZA" },
-        { "KOR", "KR" }, { "LKA", "LK" }, { "SWE", "SE" }, { "CHE", "CH" },
-        { "TWN", "TW" }, { "THA", "TH" }, { "TUR", "TR" }, { "ARE", "AE" },
-        { "UKR", "UA" }, { "URY", "UY" }, { "USA", "US" }, { "VEN", "VE" },
-        { "VNM", "VN" }, { "NZL", "NZ" },
-    };
+    private const string NetflixJsonUrl = "https://raw.githubusercontent.com/tompec/netflix-prices/main/data/latest.json";
+    private static readonly string[] SupportedNetflixPlans = ["mobile", "basic", "standard", "premium"];
 
     // Average hourly wages in USD (approximation based on GDP per capita and average work hours)
-    private static readonly Dictionary<string, decimal> HourlyWagesUsd = new()
+    private static readonly Dictionary<string, decimal> HourlyWagesUsd = new(StringComparer.OrdinalIgnoreCase)
     {
         { "US", 34.0m }, { "CH", 45.0m }, { "NO", 40.0m }, { "AU", 32.0m },
         { "DK", 38.0m }, { "DE", 30.0m }, { "GB", 28.0m }, { "CA", 29.0m },
@@ -74,158 +56,129 @@ public class PricingIndexImportService : IPricingIndexImportService
     {
         _logger.LogInformation("=== Starting Big Mac Index import ===");
         _logger.LogInformation("URL: {Url}", BigMacCsvUrl);
-        _logger.LogInformation("Timestamp: {Timestamp}", DateTime.UtcNow);
 
         try
         {
-            _logger.LogInformation("Fetching CSV data from GitHub...");
             var response = await _httpClient.GetAsync(BigMacCsvUrl);
-            _logger.LogInformation("HTTP Response: Status={StatusCode}, ReasonPhrase={ReasonPhrase}",
-                (int)response.StatusCode, response.ReasonPhrase);
-
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogError("Failed to fetch CSV: HTTP {StatusCode}", (int)response.StatusCode);
                 return new ImportResult { Success = false, ErrorMessage = $"HTTP {(int)response.StatusCode}: {response.ReasonPhrase}" };
             }
 
             var csvContent = await response.Content.ReadAsStringAsync();
-            var lines = csvContent.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-
-            _logger.LogInformation("CSV fetched successfully: {ByteLength} bytes, {LineCount} lines",
-                csvContent.Length, lines.Length);
-
+            var lines = csvContent.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (lines.Length < 2)
             {
-                _logger.LogWarning("CSV file is empty or contains only header");
                 return new ImportResult { Success = false, ErrorMessage = "CSV file is empty or invalid" };
             }
 
-            // Parse header
-            var header = lines[0].Split(',');
+            var header = ParseCsvLine(lines[0]);
             var dateIndex = Array.IndexOf(header, "date");
             var isoA3Index = Array.IndexOf(header, "iso_a3");
             var nameIndex = Array.IndexOf(header, "name");
+            var currencyIndex = Array.IndexOf(header, "currency_code");
             var localPriceIndex = Array.IndexOf(header, "local_price");
             var dollarPriceIndex = Array.IndexOf(header, "dollar_price");
             var dollarExIndex = Array.IndexOf(header, "dollar_ex");
             var usdRawIndex = Array.IndexOf(header, "USD_raw");
 
-            _logger.LogInformation("CSV Header columns: {ColumnCount}", header.Length);
-            _logger.LogInformation("Header indices - date:{DateIdx}, iso_a3:{IsoIdx}, name:{NameIdx}, local_price:{LocalIdx}, dollar_price:{DollarIdx}, dollar_ex:{ExIdx}, USD_raw:{RawIdx}",
-                dateIndex, isoA3Index, nameIndex, localPriceIndex, dollarPriceIndex, dollarExIndex, usdRawIndex);
-
             if (dateIndex < 0 || isoA3Index < 0 || dollarPriceIndex < 0)
             {
-                _logger.LogError("Required columns not found in CSV header. Header: {Header}", lines[0]);
                 return new ImportResult { Success = false, ErrorMessage = "Required columns not found in CSV" };
             }
 
-            // Group by country and get latest entry for each
-            var latestByCountry = new Dictionary<string, (DateTime Date, string[] Fields)>();
-            var skippedRows = 0;
-            var parsedRows = 0;
-
-            for (int i = 1; i < lines.Length; i++)
+            var latestByCountry = new Dictionary<string, (DateTime Date, string[] Fields)>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 1; i < lines.Length; i++)
             {
                 var fields = ParseCsvLine(lines[i]);
                 if (fields.Length <= Math.Max(dateIndex, Math.Max(isoA3Index, dollarPriceIndex)))
                 {
-                    skippedRows++;
                     continue;
                 }
 
-                if (!DateTime.TryParse(fields[dateIndex], out var date))
+                if (!DateTime.TryParse(fields[dateIndex], CultureInfo.InvariantCulture, out var rowDate))
                 {
-                    _logger.LogDebug("Row {Row}: Failed to parse date '{DateValue}'", i, fields[dateIndex]);
-                    skippedRows++;
                     continue;
                 }
 
-                var iso3 = fields[isoA3Index];
-                if (string.IsNullOrEmpty(iso3))
+                var iso3 = fields[isoA3Index]?.Trim().ToUpperInvariant();
+                if (string.IsNullOrWhiteSpace(iso3))
                 {
-                    skippedRows++;
                     continue;
                 }
 
-                parsedRows++;
-                if (!latestByCountry.TryGetValue(iso3, out var existing) || existing.Date < date)
+                if (!latestByCountry.TryGetValue(iso3, out var existing) || existing.Date < rowDate)
                 {
-                    latestByCountry[iso3] = (date, fields);
+                    latestByCountry[iso3] = (rowDate, fields);
                 }
             }
 
-            _logger.LogInformation("CSV parsing complete: {ParsedRows} rows parsed, {SkippedRows} rows skipped, {UniqueCountries} unique countries",
-                parsedRows, skippedRows, latestByCountry.Count);
+            if (latestByCountry.Count == 0)
+            {
+                return new ImportResult { Success = false, ErrorMessage = "No valid rows found in Big Mac source" };
+            }
+
+            var usFields = latestByCountry.GetValueOrDefault("USA").Fields;
+            var usDollarPrice = 5.69m;
+            if (usFields != null &&
+                usFields.Length > dollarPriceIndex &&
+                decimal.TryParse(usFields[dollarPriceIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedUsPrice) &&
+                parsedUsPrice > 0)
+            {
+                usDollarPrice = parsedUsPrice;
+            }
 
             var imported = 0;
             var updated = 0;
-            var skippedNoMapping = 0;
-            var skippedParseFailed = 0;
+            var skipped = 0;
             DateTime? dataDate = null;
 
-            // Get US price first for reference
-            var usFields = latestByCountry.GetValueOrDefault("USA").Fields;
-            decimal usaDollarPrice = 5.69m;
-            if (usFields != null && decimal.TryParse(usFields[dollarPriceIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var usp))
+            foreach (var (_, (rowDate, fields)) in latestByCountry)
             {
-                usaDollarPrice = usp;
-            }
-            _logger.LogInformation("US Big Mac reference price: ${UsdPrice:F2}", usaDollarPrice);
-
-            foreach (var (iso3, (date, fields)) in latestByCountry)
-            {
-                // Convert ISO-3 to ISO-2
-                if (!Alpha3ToAlpha2.TryGetValue(iso3, out var regionCode))
+                var iso3 = fields[isoA3Index]?.Trim().ToUpperInvariant();
+                var regionCode = RegionCodeNormalizer.NormalizeToAlpha3(iso3);
+                if (string.IsNullOrWhiteSpace(regionCode))
                 {
-                    _logger.LogDebug("Skipping {Iso3}: No ISO-2 mapping found in Alpha3ToAlpha2 dictionary", iso3);
-                    skippedNoMapping++;
+                    skipped++;
                     continue;
                 }
 
-                if (!decimal.TryParse(fields[localPriceIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var localPrice))
+                if (!decimal.TryParse(fields[localPriceIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var localPrice) ||
+                    !decimal.TryParse(fields[dollarPriceIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var dollarPrice) ||
+                    dollarPrice <= 0)
                 {
-                    _logger.LogWarning("Skipping {Iso3} -> {RegionCode}: Failed to parse local_price '{Value}'",
-                        iso3, regionCode, fields[localPriceIndex]);
-                    skippedParseFailed++;
-                    continue;
-                }
-                if (!decimal.TryParse(fields[dollarPriceIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var dollarPrice))
-                {
-                    _logger.LogWarning("Skipping {Iso3} -> {RegionCode}: Failed to parse dollar_price '{Value}'",
-                        iso3, regionCode, fields[dollarPriceIndex]);
-                    skippedParseFailed++;
+                    skipped++;
                     continue;
                 }
 
                 decimal? exchangeRate = null;
-                if (dollarExIndex >= 0 && dollarExIndex < fields.Length)
+                if (dollarExIndex >= 0 &&
+                    dollarExIndex < fields.Length &&
+                    decimal.TryParse(fields[dollarExIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var ex))
                 {
-                    if (decimal.TryParse(fields[dollarExIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var ex))
-                    {
-                        exchangeRate = ex;
-                    }
+                    exchangeRate = ex;
                 }
 
-                decimal usdRaw = 0;
-                if (usdRawIndex >= 0 && usdRawIndex < fields.Length)
-                    decimal.TryParse(fields[usdRawIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out usdRaw);
+                var currencyCode = currencyIndex >= 0 && currencyIndex < fields.Length
+                    ? fields[currencyIndex]?.Trim().ToUpperInvariant()
+                    : null;
+                var countryName = nameIndex >= 0 && nameIndex < fields.Length
+                    ? fields[nameIndex]
+                    : null;
 
-                var countryName = nameIndex >= 0 && nameIndex < fields.Length ? fields[nameIndex] : null;
-                dataDate ??= date;
-
-                // Calculate multiplier
-                var multiplier = usdRaw != 0 ? (1 + usdRaw / 100) : (dollarPrice / usaDollarPrice);
-                var originalMultiplier = multiplier;
+                var usdRaw = 0m;
+                var hasUsdRaw = usdRawIndex >= 0 &&
+                                usdRawIndex < fields.Length &&
+                                decimal.TryParse(fields[usdRawIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out usdRaw);
+                var multiplier = hasUsdRaw
+                    ? 1m + usdRaw
+                    : (usDollarPrice > 0 ? dollarPrice / usDollarPrice : 1m);
                 multiplier = Math.Clamp(multiplier, 0.1m, 3.0m);
 
-                _logger.LogDebug("Processing {Iso3} -> {RegionCode} ({Country}): local={LocalPrice:F2}, usd=${DollarPrice:F2}, usdRaw={UsdRaw:F2}%, multiplier={Multiplier:F4} (clamped from {Original:F4})",
-                    iso3, regionCode, countryName ?? "Unknown", localPrice, dollarPrice, usdRaw, multiplier, originalMultiplier);
-
-                // Save raw data
-                var existingRaw = await _context.PricingIndexRawData
-                    .FirstOrDefaultAsync(r => r.IndexType == PricingIndexType.BigMac && r.RegionCode == regionCode);
+                var existingRaw = await _context.PricingIndexRawData.FirstOrDefaultAsync(r =>
+                    r.IndexType == PricingIndexType.BigMac &&
+                    r.RegionCode == regionCode &&
+                    r.PlanType == null);
 
                 if (existingRaw == null)
                 {
@@ -235,28 +188,30 @@ public class PricingIndexImportService : IPricingIndexImportService
                         IndexType = PricingIndexType.BigMac,
                         RegionCode = regionCode,
                         CountryName = countryName,
+                        CurrencyCode = currencyCode,
                         LocalPrice = localPrice,
                         UsdPrice = dollarPrice,
                         ExchangeRate = exchangeRate,
-                        DataDate = date,
+                        DataDate = rowDate,
                         ImportedAt = DateTime.UtcNow
                     });
                 }
                 else
                 {
                     existingRaw.CountryName = countryName;
+                    existingRaw.CurrencyCode = currencyCode;
                     existingRaw.LocalPrice = localPrice;
                     existingRaw.UsdPrice = dollarPrice;
                     existingRaw.ExchangeRate = exchangeRate;
-                    existingRaw.DataDate = date;
+                    existingRaw.DataDate = rowDate;
                     existingRaw.ImportedAt = DateTime.UtcNow;
                 }
 
-                // Save multiplier
-                var existingMultiplier = await _context.PppMultipliers
-                    .FirstOrDefaultAsync(m => m.RegionCode == regionCode &&
-                                             m.UserId == null &&
-                                             m.IndexType == PricingIndexType.BigMac);
+                var existingMultiplier = await _context.PppMultipliers.FirstOrDefaultAsync(m =>
+                    m.RegionCode == regionCode &&
+                    m.UserId == null &&
+                    m.IndexType == PricingIndexType.BigMac &&
+                    m.PlanType == null);
 
                 if (existingMultiplier == null)
                 {
@@ -267,36 +222,33 @@ public class PricingIndexImportService : IPricingIndexImportService
                         CountryName = countryName,
                         Multiplier = multiplier,
                         Source = "big_mac_index",
+                        CurrencyCode = currencyCode,
                         IndexType = PricingIndexType.BigMac,
-                        DataDate = date,
+                        PlanType = null,
+                        DataDate = rowDate,
                         UserId = null,
                         UpdatedAt = DateTime.UtcNow
                     });
                     imported++;
-                    _logger.LogDebug("Created new multiplier for {RegionCode}", regionCode);
                 }
                 else
                 {
-                    var previousMultiplier = existingMultiplier.Multiplier;
                     existingMultiplier.Multiplier = multiplier;
                     existingMultiplier.CountryName = countryName;
-                    existingMultiplier.DataDate = date;
+                    existingMultiplier.CurrencyCode = currencyCode;
+                    existingMultiplier.Source = "big_mac_index";
+                    existingMultiplier.DataDate = rowDate;
                     existingMultiplier.UpdatedAt = DateTime.UtcNow;
                     updated++;
-                    _logger.LogDebug("Updated multiplier for {RegionCode}: {OldValue:F4} -> {NewValue:F4}",
-                        regionCode, previousMultiplier, multiplier);
                 }
+
+                dataDate = dataDate.HasValue && dataDate.Value > rowDate ? dataDate : rowDate;
             }
 
-            _logger.LogInformation("Saving changes to database...");
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("=== Big Mac Index import completed ===");
-            _logger.LogInformation("Results: {Imported} new, {Updated} updated, {Total} total",
-                imported, updated, imported + updated);
-            _logger.LogInformation("Skipped: {NoMapping} (no ISO-2 mapping), {ParseFailed} (parse failures)",
-                skippedNoMapping, skippedParseFailed);
-            _logger.LogInformation("Data date: {DataDate}", dataDate);
+            _logger.LogInformation("Big Mac import completed: {Imported} imported, {Updated} updated, {Skipped} skipped",
+                imported, updated, skipped);
 
             return new ImportResult
             {
@@ -307,174 +259,151 @@ public class PricingIndexImportService : IPricingIndexImportService
                 DataDate = dataDate
             };
         }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogError(ex, "HTTP request failed for Big Mac Index import: {Message}", ex.Message);
-            return new ImportResult { Success = false, ErrorMessage = $"HTTP Error: {ex.Message}" };
-        }
-        catch (TaskCanceledException ex)
-        {
-            _logger.LogError(ex, "Request timeout during Big Mac Index import");
-            return new ImportResult { Success = false, ErrorMessage = "Request timeout" };
-        }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to import Big Mac Index. Exception: {ExceptionType}, Message: {Message}",
-                ex.GetType().Name, ex.Message);
-            _logger.LogError("Stack trace: {StackTrace}", ex.StackTrace);
+            _logger.LogError(ex, "Failed to import Big Mac Index");
             return new ImportResult { Success = false, ErrorMessage = ex.Message };
         }
     }
 
-    public async Task<ImportResult> ImportNetflixIndexAsync(string planType = "standard")
+    public async Task<ImportResult> ImportNetflixIndexAsync(string? planType = null)
     {
         _logger.LogInformation("=== Starting Netflix Index import ===");
         _logger.LogInformation("URL: {Url}", NetflixJsonUrl);
-        _logger.LogInformation("Plan type: {PlanType}", planType);
-        _logger.LogInformation("Timestamp: {Timestamp}", DateTime.UtcNow);
 
         try
         {
-            _logger.LogInformation("Fetching JSON data from GitHub...");
             var response = await _httpClient.GetAsync(NetflixJsonUrl);
-            _logger.LogInformation("HTTP Response: Status={StatusCode}, ReasonPhrase={ReasonPhrase}",
-                (int)response.StatusCode, response.ReasonPhrase);
-
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogError("Failed to fetch JSON: HTTP {StatusCode}", (int)response.StatusCode);
                 return new ImportResult { Success = false, ErrorMessage = $"HTTP {(int)response.StatusCode}: {response.ReasonPhrase}" };
             }
 
             var jsonContent = await response.Content.ReadAsStringAsync();
-            _logger.LogInformation("JSON fetched successfully: {ByteLength} bytes", jsonContent.Length);
-
             var netflixData = JsonSerializer.Deserialize<List<NetflixCountryData>>(jsonContent,
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
             if (netflixData == null || netflixData.Count == 0)
             {
-                _logger.LogWarning("Netflix data is empty or failed to deserialize");
                 return new ImportResult { Success = false, ErrorMessage = "Netflix data is empty or invalid" };
             }
 
-            _logger.LogInformation("Deserialized {Count} countries from Netflix data", netflixData.Count);
-
-            // Find US price for reference
-            var usEntry = netflixData.FirstOrDefault(n => n.CountryCode?.ToUpper() == "US");
-            var usPrice = usEntry?.Plans?.FirstOrDefault(p => p.Name?.ToLower() == planType.ToLower())?.PriceUsd ?? 15.49m;
-            _logger.LogInformation("US Netflix {PlanType} reference price: ${UsdPrice:F2}", planType, usPrice);
-
+            var planTypesToImport = GetNetflixPlanTypes(planType);
+            var normalizedUsCode = "USA";
             var imported = 0;
             var updated = 0;
-            var skippedNoCode = 0;
-            var skippedNoPlan = 0;
+            var skipped = 0;
             var dataDate = DateTime.UtcNow;
 
-            foreach (var entry in netflixData)
+            foreach (var currentPlanType in planTypesToImport)
             {
-                if (string.IsNullOrEmpty(entry.CountryCode))
+                var usPrice = netflixData
+                    .Where(c => RegionCodeNormalizer.NormalizeToAlpha3(c.CountryCode) == normalizedUsCode)
+                    .SelectMany(c => c.Plans ?? [])
+                    .Where(p => NormalizePlanType(p.Name) == currentPlanType && p.PriceUsd.HasValue && p.PriceUsd.Value > 0)
+                    .Select(p => p.PriceUsd!.Value)
+                    .FirstOrDefault();
+
+                if (usPrice <= 0)
                 {
-                    _logger.LogDebug("Skipping entry with no country code: {Country}", entry.Country);
-                    skippedNoCode++;
+                    _logger.LogWarning("Skipping Netflix plan {PlanType}: no valid US reference price", currentPlanType);
                     continue;
                 }
 
-                var regionCode = entry.CountryCode.ToUpper();
-                var plan = entry.Plans?.FirstOrDefault(p => p.Name?.ToLower() == planType.ToLower());
-
-                if (plan == null || plan.PriceUsd == null || plan.PriceUsd <= 0)
+                foreach (var entry in netflixData)
                 {
-                    _logger.LogDebug("Skipping {RegionCode} ({Country}): No valid {PlanType} plan found",
-                        regionCode, entry.Country, planType);
-                    skippedNoPlan++;
-                    continue;
-                }
-
-                // Calculate multiplier
-                var multiplier = plan.PriceUsd.Value / usPrice;
-                var originalMultiplier = multiplier;
-                multiplier = Math.Clamp(multiplier, 0.1m, 3.0m);
-
-                _logger.LogDebug("Processing {RegionCode} ({Country}): local={LocalPrice:F2} {Currency}, usd=${UsdPrice:F2}, multiplier={Multiplier:F4}",
-                    regionCode, entry.Country, plan.Price ?? 0, entry.Currency ?? "?", plan.PriceUsd.Value, multiplier);
-
-                // Save raw data
-                var existingRaw = await _context.PricingIndexRawData
-                    .FirstOrDefaultAsync(r => r.IndexType == PricingIndexType.Netflix &&
-                                             r.RegionCode == regionCode &&
-                                             r.PlanType == planType);
-
-                if (existingRaw == null)
-                {
-                    _context.PricingIndexRawData.Add(new PricingIndexRawData
+                    var regionCode = RegionCodeNormalizer.NormalizeToAlpha3(entry.CountryCode);
+                    if (string.IsNullOrWhiteSpace(regionCode))
                     {
-                        Id = Guid.NewGuid(),
-                        IndexType = PricingIndexType.Netflix,
-                        RegionCode = regionCode,
-                        CountryName = entry.Country,
-                        CurrencyCode = entry.Currency,
-                        LocalPrice = plan.Price ?? 0,
-                        UsdPrice = plan.PriceUsd.Value,
-                        PlanType = planType,
-                        DataDate = dataDate,
-                        ImportedAt = DateTime.UtcNow
-                    });
-                }
-                else
-                {
-                    existingRaw.CountryName = entry.Country;
-                    existingRaw.CurrencyCode = entry.Currency;
-                    existingRaw.LocalPrice = plan.Price ?? 0;
-                    existingRaw.UsdPrice = plan.PriceUsd.Value;
-                    existingRaw.DataDate = dataDate;
-                    existingRaw.ImportedAt = DateTime.UtcNow;
-                }
+                        skipped++;
+                        continue;
+                    }
 
-                // Save multiplier
-                var existingMultiplier = await _context.PppMultipliers
-                    .FirstOrDefaultAsync(m => m.RegionCode == regionCode &&
-                                             m.UserId == null &&
-                                             m.IndexType == PricingIndexType.Netflix);
+                    var plan = entry.Plans?
+                        .FirstOrDefault(p => NormalizePlanType(p.Name) == currentPlanType);
 
-                if (existingMultiplier == null)
-                {
-                    _context.PppMultipliers.Add(new PppMultiplier
+                    if (plan?.PriceUsd == null || plan.PriceUsd <= 0)
                     {
-                        Id = Guid.NewGuid(),
-                        RegionCode = regionCode,
-                        CountryName = entry.Country,
-                        Multiplier = multiplier,
-                        Source = $"netflix_{planType}",
-                        IndexType = PricingIndexType.Netflix,
-                        DataDate = dataDate,
-                        UserId = null,
-                        UpdatedAt = DateTime.UtcNow
-                    });
-                    imported++;
-                    _logger.LogDebug("Created new multiplier for {RegionCode}", regionCode);
-                }
-                else
-                {
-                    var previousMultiplier = existingMultiplier.Multiplier;
-                    existingMultiplier.Multiplier = multiplier;
-                    existingMultiplier.CountryName = entry.Country;
-                    existingMultiplier.DataDate = dataDate;
-                    existingMultiplier.UpdatedAt = DateTime.UtcNow;
-                    updated++;
-                    _logger.LogDebug("Updated multiplier for {RegionCode}: {OldValue:F4} -> {NewValue:F4}",
-                        regionCode, previousMultiplier, multiplier);
+                        skipped++;
+                        continue;
+                    }
+
+                    var multiplier = Math.Clamp(plan.PriceUsd.Value / usPrice, 0.1m, 3.0m);
+                    var currencyCode = entry.Currency?.Trim().ToUpperInvariant();
+
+                    var existingRaw = await _context.PricingIndexRawData.FirstOrDefaultAsync(r =>
+                        r.IndexType == PricingIndexType.Netflix &&
+                        r.RegionCode == regionCode &&
+                        r.PlanType == currentPlanType);
+
+                    if (existingRaw == null)
+                    {
+                        _context.PricingIndexRawData.Add(new PricingIndexRawData
+                        {
+                            Id = Guid.NewGuid(),
+                            IndexType = PricingIndexType.Netflix,
+                            RegionCode = regionCode,
+                            CountryName = entry.Country,
+                            CurrencyCode = currencyCode,
+                            LocalPrice = plan.Price ?? 0,
+                            UsdPrice = plan.PriceUsd.Value,
+                            PlanType = currentPlanType,
+                            DataDate = dataDate,
+                            ImportedAt = DateTime.UtcNow
+                        });
+                    }
+                    else
+                    {
+                        existingRaw.CountryName = entry.Country;
+                        existingRaw.CurrencyCode = currencyCode;
+                        existingRaw.LocalPrice = plan.Price ?? 0;
+                        existingRaw.UsdPrice = plan.PriceUsd.Value;
+                        existingRaw.PlanType = currentPlanType;
+                        existingRaw.DataDate = dataDate;
+                        existingRaw.ImportedAt = DateTime.UtcNow;
+                    }
+
+                    var existingMultiplier = await _context.PppMultipliers.FirstOrDefaultAsync(m =>
+                        m.RegionCode == regionCode &&
+                        m.UserId == null &&
+                        m.IndexType == PricingIndexType.Netflix &&
+                        m.PlanType == currentPlanType);
+
+                    if (existingMultiplier == null)
+                    {
+                        _context.PppMultipliers.Add(new PppMultiplier
+                        {
+                            Id = Guid.NewGuid(),
+                            RegionCode = regionCode,
+                            CountryName = entry.Country,
+                            Multiplier = multiplier,
+                            Source = $"netflix_{currentPlanType}",
+                            CurrencyCode = currencyCode,
+                            IndexType = PricingIndexType.Netflix,
+                            PlanType = currentPlanType,
+                            DataDate = dataDate,
+                            UserId = null,
+                            UpdatedAt = DateTime.UtcNow
+                        });
+                        imported++;
+                    }
+                    else
+                    {
+                        existingMultiplier.Multiplier = multiplier;
+                        existingMultiplier.CountryName = entry.Country;
+                        existingMultiplier.CurrencyCode = currencyCode;
+                        existingMultiplier.Source = $"netflix_{currentPlanType}";
+                        existingMultiplier.DataDate = dataDate;
+                        existingMultiplier.UpdatedAt = DateTime.UtcNow;
+                        updated++;
+                    }
                 }
             }
 
-            _logger.LogInformation("Saving changes to database...");
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("=== Netflix Index import completed ===");
-            _logger.LogInformation("Results: {Imported} new, {Updated} updated, {Total} total",
-                imported, updated, imported + updated);
-            _logger.LogInformation("Skipped: {NoCode} (no country code), {NoPlan} (no valid plan)",
-                skippedNoCode, skippedNoPlan);
+            _logger.LogInformation("Netflix import completed: {Imported} imported, {Updated} updated, {Skipped} skipped",
+                imported, updated, skipped);
 
             return new ImportResult
             {
@@ -485,45 +414,50 @@ public class PricingIndexImportService : IPricingIndexImportService
                 DataDate = dataDate
             };
         }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogError(ex, "HTTP request failed for Netflix Index import: {Message}", ex.Message);
-            return new ImportResult { Success = false, ErrorMessage = $"HTTP Error: {ex.Message}" };
-        }
-        catch (JsonException ex)
-        {
-            _logger.LogError(ex, "JSON parsing failed for Netflix Index import: {Message}", ex.Message);
-            return new ImportResult { Success = false, ErrorMessage = $"JSON Error: {ex.Message}" };
-        }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to import Netflix Index. Exception: {ExceptionType}, Message: {Message}",
-                ex.GetType().Name, ex.Message);
-            _logger.LogError("Stack trace: {StackTrace}", ex.StackTrace);
-            return new ImportResult { Success = false, ErrorMessage = ex.Message };
+            var rootCause = UnwrapTypeInitializationException(ex);
+            _logger.LogError(ex, "Failed to import Netflix Index");
+            if (!ReferenceEquals(rootCause, ex))
+            {
+                _logger.LogError(
+                    "Root cause for Netflix Index import failure: {ExceptionType}: {ExceptionMessage}",
+                    rootCause.GetType().Name,
+                    rootCause.Message);
+            }
+
+            return new ImportResult { Success = false, ErrorMessage = rootCause.Message };
         }
     }
 
     public async Task<ImportResult> ImportWageDataAsync()
     {
         _logger.LogInformation("=== Starting Wage Data import ===");
-        _logger.LogInformation("Source: Pre-defined hourly wages dictionary");
-        _logger.LogInformation("Timestamp: {Timestamp}", DateTime.UtcNow);
-        _logger.LogInformation("Countries in wage dictionary: {Count}", HourlyWagesUsd.Count);
 
         try
         {
+            var bigMacCurrencyByRegion = await _context.PricingIndexRawData
+                .Where(r => r.IndexType == PricingIndexType.BigMac && r.PlanType == null)
+                .ToDictionaryAsync(r => r.RegionCode, r => r.CurrencyCode);
+
             var imported = 0;
             var updated = 0;
             var dataDate = DateTime.UtcNow;
 
-            foreach (var (regionCode, hourlyWage) in HourlyWagesUsd)
+            foreach (var (alpha2Code, hourlyWage) in HourlyWagesUsd)
             {
-                _logger.LogDebug("Processing {RegionCode}: hourlyWage=${HourlyWage:F2}/hour", regionCode, hourlyWage);
+                var regionCode = RegionCodeNormalizer.NormalizeToAlpha3(alpha2Code);
+                if (string.IsNullOrWhiteSpace(regionCode))
+                {
+                    continue;
+                }
 
-                var existingRaw = await _context.PricingIndexRawData
-                    .FirstOrDefaultAsync(r => r.IndexType == PricingIndexType.BigMacWorkingHours &&
-                                             r.RegionCode == regionCode);
+                bigMacCurrencyByRegion.TryGetValue(regionCode, out var currencyCode);
+
+                var existingRaw = await _context.PricingIndexRawData.FirstOrDefaultAsync(r =>
+                    r.IndexType == PricingIndexType.BigMacWorkingHours &&
+                    r.RegionCode == regionCode &&
+                    r.PlanType == null);
 
                 if (existingRaw == null)
                 {
@@ -532,31 +466,24 @@ public class PricingIndexImportService : IPricingIndexImportService
                         Id = Guid.NewGuid(),
                         IndexType = PricingIndexType.BigMacWorkingHours,
                         RegionCode = regionCode,
+                        CurrencyCode = currencyCode,
                         HourlyWage = hourlyWage,
                         DataDate = dataDate,
                         ImportedAt = DateTime.UtcNow
                     });
                     imported++;
-                    _logger.LogDebug("Created new wage entry for {RegionCode}", regionCode);
                 }
                 else
                 {
-                    var previousWage = existingRaw.HourlyWage;
+                    existingRaw.CurrencyCode = currencyCode;
                     existingRaw.HourlyWage = hourlyWage;
                     existingRaw.DataDate = dataDate;
                     existingRaw.ImportedAt = DateTime.UtcNow;
                     updated++;
-                    _logger.LogDebug("Updated wage entry for {RegionCode}: ${OldValue:F2} -> ${NewValue:F2}",
-                        regionCode, previousWage, hourlyWage);
                 }
             }
 
-            _logger.LogInformation("Saving changes to database...");
             await _context.SaveChangesAsync();
-
-            _logger.LogInformation("=== Wage Data import completed ===");
-            _logger.LogInformation("Results: {Imported} new, {Updated} updated, {Total} total",
-                imported, updated, imported + updated);
 
             return new ImportResult
             {
@@ -569,9 +496,7 @@ public class PricingIndexImportService : IPricingIndexImportService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to import Wage Data. Exception: {ExceptionType}, Message: {Message}",
-                ex.GetType().Name, ex.Message);
-            _logger.LogError("Stack trace: {StackTrace}", ex.StackTrace);
+            _logger.LogError(ex, "Failed to import Wage Data");
             return new ImportResult { Success = false, ErrorMessage = ex.Message };
         }
     }
@@ -579,65 +504,44 @@ public class PricingIndexImportService : IPricingIndexImportService
     public async Task<ImportResult> CalculateBigMacWorkingHoursAsync()
     {
         _logger.LogInformation("=== Starting Big Mac Working Hours calculation ===");
-        _logger.LogInformation("Timestamp: {Timestamp}", DateTime.UtcNow);
 
         try
         {
-            // First ensure we have Big Mac data
-            _logger.LogInformation("Loading Big Mac raw data from database...");
             var bigMacData = await _context.PricingIndexRawData
-                .Where(r => r.IndexType == PricingIndexType.BigMac)
+                .Where(r => r.IndexType == PricingIndexType.BigMac && r.PlanType == null)
                 .ToListAsync();
-
-            _logger.LogInformation("Found {Count} Big Mac entries in database", bigMacData.Count);
 
             if (bigMacData.Count == 0)
             {
-                _logger.LogWarning("No Big Mac data available. Import Big Mac Index first.");
                 return new ImportResult { Success = false, ErrorMessage = "No Big Mac data available. Import Big Mac Index first." };
             }
 
-            var imported = 0;
-            var updated = 0;
-            var skippedNoWage = 0;
-            var dataDate = DateTime.UtcNow;
-
-            // Get US reference data
+            var usBigMac = bigMacData.FirstOrDefault(b => b.RegionCode == "USA")?.UsdPrice ?? 5.69m;
             var usWage = HourlyWagesUsd.GetValueOrDefault("US", 34.0m);
-            var usBigMac = bigMacData.FirstOrDefault(b => b.RegionCode == "US")?.UsdPrice ?? 5.69m;
             var usWorkingHours = usBigMac / usWage;
 
-            _logger.LogInformation("US Reference: wage=${UsWage:F2}/hour, Big Mac=${UsBigMac:F2}, working hours={UsWorkingHours:F4}h",
-                usWage, usBigMac, usWorkingHours);
+            var imported = 0;
+            var updated = 0;
+            var skipped = 0;
+            var dataDate = DateTime.UtcNow;
 
             foreach (var entry in bigMacData)
             {
-                if (!HourlyWagesUsd.TryGetValue(entry.RegionCode, out var hourlyWage))
+                var alpha2Code = RegionCodeNormalizer.NormalizeToAlpha2(entry.RegionCode);
+                if (string.IsNullOrWhiteSpace(alpha2Code) || !HourlyWagesUsd.TryGetValue(alpha2Code, out var hourlyWage))
                 {
-                    _logger.LogDebug("Skipping {RegionCode} ({Country}): No wage data in HourlyWagesUsd dictionary",
-                        entry.RegionCode, entry.CountryName);
-                    skippedNoWage++;
+                    skipped++;
                     continue;
                 }
 
-                // Working hours to buy a Big Mac
                 var workingHours = entry.UsdPrice / hourlyWage;
-                var multiplier = workingHours / usWorkingHours;
-                var originalMultiplier = multiplier;
-                multiplier = Math.Clamp(multiplier, 0.1m, 5.0m);
+                var multiplier = Math.Clamp(workingHours / usWorkingHours, 0.1m, 5.0m);
 
-                _logger.LogDebug("Processing {RegionCode} ({Country}): wage=${Wage:F2}/hour, bigMac=${BigMac:F2}, workingHours={WorkingHours:F4}h, multiplier={Multiplier:F4}",
-                    entry.RegionCode, entry.CountryName, hourlyWage, entry.UsdPrice, workingHours, multiplier);
-
-                // Update raw data with working hours
-                entry.HourlyWage = hourlyWage;
-                entry.WorkingHours = workingHours;
-
-                // Save multiplier
-                var existingMultiplier = await _context.PppMultipliers
-                    .FirstOrDefaultAsync(m => m.RegionCode == entry.RegionCode &&
-                                             m.UserId == null &&
-                                             m.IndexType == PricingIndexType.BigMacWorkingHours);
+                var existingMultiplier = await _context.PppMultipliers.FirstOrDefaultAsync(m =>
+                    m.RegionCode == entry.RegionCode &&
+                    m.UserId == null &&
+                    m.IndexType == PricingIndexType.BigMacWorkingHours &&
+                    m.PlanType == null);
 
                 if (existingMultiplier == null)
                 {
@@ -648,34 +552,31 @@ public class PricingIndexImportService : IPricingIndexImportService
                         CountryName = entry.CountryName,
                         Multiplier = multiplier,
                         Source = "big_mac_working_hours",
+                        CurrencyCode = entry.CurrencyCode,
                         IndexType = PricingIndexType.BigMacWorkingHours,
+                        PlanType = null,
                         DataDate = dataDate,
                         UserId = null,
                         UpdatedAt = DateTime.UtcNow
                     });
                     imported++;
-                    _logger.LogDebug("Created new working hours multiplier for {RegionCode}", entry.RegionCode);
                 }
                 else
                 {
-                    var previousMultiplier = existingMultiplier.Multiplier;
                     existingMultiplier.Multiplier = multiplier;
                     existingMultiplier.CountryName = entry.CountryName;
+                    existingMultiplier.CurrencyCode = entry.CurrencyCode;
+                    existingMultiplier.Source = "big_mac_working_hours";
                     existingMultiplier.DataDate = dataDate;
                     existingMultiplier.UpdatedAt = DateTime.UtcNow;
                     updated++;
-                    _logger.LogDebug("Updated working hours multiplier for {RegionCode}: {OldValue:F4} -> {NewValue:F4}",
-                        entry.RegionCode, previousMultiplier, multiplier);
                 }
             }
 
-            _logger.LogInformation("Saving changes to database...");
             await _context.SaveChangesAsync();
 
-            _logger.LogInformation("=== Big Mac Working Hours calculation completed ===");
-            _logger.LogInformation("Results: {Imported} new, {Updated} updated, {Total} total",
-                imported, updated, imported + updated);
-            _logger.LogInformation("Skipped: {NoWage} (no wage data available)", skippedNoWage);
+            _logger.LogInformation("Working hours calculation completed: {Imported} imported, {Updated} updated, {Skipped} skipped",
+                imported, updated, skipped);
 
             return new ImportResult
             {
@@ -688,38 +589,92 @@ public class PricingIndexImportService : IPricingIndexImportService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to calculate Big Mac Working Hours. Exception: {ExceptionType}, Message: {Message}",
-                ex.GetType().Name, ex.Message);
-            _logger.LogError("Stack trace: {StackTrace}", ex.StackTrace);
-            return new ImportResult { Success = false, ErrorMessage = ex.Message };
+            var rootCause = UnwrapTypeInitializationException(ex);
+            _logger.LogError(ex, "Failed to calculate Big Mac Working Hours");
+            if (!ReferenceEquals(rootCause, ex))
+            {
+                _logger.LogError(
+                    "Root cause for Big Mac Working Hours failure: {ExceptionType}: {ExceptionMessage}",
+                    rootCause.GetType().Name,
+                    rootCause.Message);
+            }
+
+            return new ImportResult { Success = false, ErrorMessage = rootCause.Message };
         }
+    }
+
+    private static Exception UnwrapTypeInitializationException(Exception ex)
+    {
+        if (ex is not TypeInitializationException)
+        {
+            return ex;
+        }
+
+        var current = ex;
+        while (current.InnerException != null)
+        {
+            current = current.InnerException;
+        }
+
+        return current;
+    }
+
+    private static IReadOnlyCollection<string> GetNetflixPlanTypes(string? planType)
+    {
+        if (string.IsNullOrWhiteSpace(planType) || string.Equals(planType.Trim(), "all", StringComparison.OrdinalIgnoreCase))
+        {
+            return SupportedNetflixPlans;
+        }
+
+        var normalized = NormalizePlanType(planType);
+        if (normalized == null || !SupportedNetflixPlans.Contains(normalized))
+        {
+            return ["standard"];
+        }
+
+        return [normalized];
+    }
+
+    private static string? NormalizePlanType(string? planType)
+    {
+        return string.IsNullOrWhiteSpace(planType)
+            ? null
+            : planType.Trim().ToLowerInvariant();
     }
 
     private static string[] ParseCsvLine(string line)
     {
         var result = new List<string>();
+        var current = new List<char>();
         var inQuotes = false;
-        var current = "";
 
-        for (int i = 0; i < line.Length; i++)
+        for (var i = 0; i < line.Length; i++)
         {
             var c = line[i];
             if (c == '"')
             {
-                inQuotes = !inQuotes;
-            }
-            else if (c == ',' && !inQuotes)
-            {
-                result.Add(current.Trim());
-                current = "";
-            }
-            else
-            {
-                current += c;
-            }
-        }
-        result.Add(current.Trim());
+                if (inQuotes && i + 1 < line.Length && line[i + 1] == '"')
+                {
+                    current.Add('"');
+                    i++;
+                    continue;
+                }
 
+                inQuotes = !inQuotes;
+                continue;
+            }
+
+            if (c == ',' && !inQuotes)
+            {
+                result.Add(new string(current.ToArray()).Trim());
+                current.Clear();
+                continue;
+            }
+
+            current.Add(c);
+        }
+
+        result.Add(new string(current.ToArray()).Trim());
         return result.ToArray();
     }
 }
@@ -736,15 +691,27 @@ public class ImportResult
 
 public class NetflixCountryData
 {
+    [JsonPropertyName("country_code")]
     public string? CountryCode { get; set; }
+
+    [JsonPropertyName("country")]
     public string? Country { get; set; }
+
+    [JsonPropertyName("currency")]
     public string? Currency { get; set; }
+
+    [JsonPropertyName("plans")]
     public List<NetflixPlan>? Plans { get; set; }
 }
 
 public class NetflixPlan
 {
+    [JsonPropertyName("name")]
     public string? Name { get; set; }
+
+    [JsonPropertyName("price")]
     public decimal? Price { get; set; }
+
+    [JsonPropertyName("price_usd")]
     public decimal? PriceUsd { get; set; }
 }
