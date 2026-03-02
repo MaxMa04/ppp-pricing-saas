@@ -92,7 +92,18 @@ export function createApi(getToken: () => Promise<string | null>) {
       syncApp: (packageName: string) =>
         request(`/api/google-play/apps/${packageName}/sync`, { method: "POST" }),
       syncSubscriptions: (packageName: string) =>
-        request<{ success: boolean; subscriptionCount: number; priceCount: number; subscriptions: any[] }>(
+        request<{
+          success: boolean;
+          subscriptionCount: number;
+          priceCount: number;
+          metadataSynced: boolean;
+          deletedSubscriptionCount: number;
+          deletedPriceCount: number;
+          isFullSnapshot: boolean;
+          appNameBefore?: string;
+          appNameAfter?: string;
+          subscriptions: any[];
+        }>(
           `/api/google-play/apps/${packageName}/sync-subscriptions`,
           { method: "POST", timeout: 60000 }
         ),
@@ -116,7 +127,18 @@ export function createApi(getToken: () => Promise<string | null>) {
       syncApp: (appStoreId: string) =>
         request(`/api/app-store/apps/${appStoreId}/sync`, { method: "POST" }),
       syncSubscriptions: (appStoreId: string) =>
-        request<{ success: boolean; subscriptionCount: number; priceCount: number; subscriptions: any[] }>(
+        request<{
+          success: boolean;
+          subscriptionCount: number;
+          priceCount: number;
+          metadataSynced: boolean;
+          deletedSubscriptionCount: number;
+          deletedPriceCount: number;
+          isFullSnapshot: boolean;
+          appNameBefore?: string;
+          appNameAfter?: string;
+          subscriptions: any[];
+        }>(
           `/api/app-store/apps/${appStoreId}/sync-subscriptions`,
           { method: "POST", timeout: 120000 }
         ),
@@ -157,8 +179,13 @@ export function createApi(getToken: () => Promise<string | null>) {
 
     // PPP
     ppp: {
-      getMultipliers: (indexType?: string) =>
-        request<any[]>(`/api/ppp/multipliers${indexType ? `?indexType=${indexType}` : ""}`),
+      getMultipliers: (indexType?: string, planType?: string) => {
+        const params = new URLSearchParams();
+        if (indexType) params.set("indexType", indexType);
+        if (planType) params.set("planType", planType);
+        const query = params.toString();
+        return request<any[]>(`/api/ppp/multipliers${query ? `?${query}` : ""}`);
+      },
       getMultiplier: (regionCode: string, indexType?: string) =>
         request<any>(`/api/ppp/multipliers/${regionCode}${indexType ? `?indexType=${indexType}` : ""}`),
       updateMultiplier: (regionCode: string, data: { multiplier: number; countryName?: string; source?: string }) =>
@@ -175,10 +202,12 @@ export function createApi(getToken: () => Promise<string | null>) {
         request<{ success: boolean; imported: number; updated: number; total: number; dataDate?: string }>("/api/ppp/import/bigmac", {
           method: "POST",
         }),
-      importNetflix: (planType: string = "standard") =>
-        request<{ success: boolean; imported: number; updated: number; total: number; dataDate?: string }>(`/api/ppp/import/netflix?planType=${planType}`, {
+      importNetflix: (planType?: string) => {
+        const query = planType ? `?planType=${encodeURIComponent(planType)}` : "";
+        return request<{ success: boolean; imported: number; updated: number; total: number; dataDate?: string }>(`/api/ppp/import/netflix${query}`, {
           method: "POST",
-        }),
+        });
+      },
       importWages: () =>
         request<{ success: boolean; imported: number; updated: number; total: number; dataDate?: string }>("/api/ppp/import/wages", {
           method: "POST",
@@ -199,10 +228,10 @@ export function createApi(getToken: () => Promise<string | null>) {
       get: (id: string) => request<any>(`/api/apps/${id}`),
       delete: (id: string) => request(`/api/apps/${id}`, { method: "DELETE" }),
       getSubscriptions: (id: string) => request<any[]>(`/api/apps/${id}/subscriptions`),
-      updatePreferredIndex: (id: string, indexType: number) =>
-        request<{ id: string; preferredIndexType: string; preferredIndexTypeValue: number }>(`/api/apps/${id}/preferred-index`, {
+      updatePreferredIndex: (id: string, indexType: number, preferredNetflixPlan?: string) =>
+        request<{ id: string; preferredIndexType: string; preferredIndexTypeValue: number; preferredNetflixPlan: string }>(`/api/apps/${id}/preferred-index`, {
           method: "PUT",
-          body: JSON.stringify({ preferredIndexType: indexType }),
+          body: JSON.stringify({ preferredIndexType: indexType, preferredNetflixPlan }),
         }),
     },
   };

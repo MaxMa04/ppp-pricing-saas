@@ -16,6 +16,13 @@ const INDEX_OPTIONS = [
   { value: 2, label: "Working Hours", description: "Purchasing power in work time" },
 ];
 
+const NETFLIX_PLAN_OPTIONS = [
+  { value: "mobile", label: "Mobile" },
+  { value: "basic", label: "Basic" },
+  { value: "standard", label: "Standard" },
+  { value: "premium", label: "Premium" },
+];
+
 export default function AppDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -44,18 +51,43 @@ export default function AppDetailPage() {
     fetchApp();
   }, [id]);
 
-  const handleIndexChange = async (indexType: number) => {
+  const ensurePppData = async (api: ReturnType<typeof createApi>, indexType: number, planType?: string) => {
+    const indexTypeMap: Record<number, string> = { 0: "BigMac", 1: "Netflix", 2: "BigMacWorkingHours" };
+    try {
+      const data = await api.ppp.getMultipliers(indexTypeMap[indexType], planType);
+      if (data.length === 0) {
+        toast.info("Loading PPP data...");
+        if (indexType === 0) {
+          await api.ppp.importBigMac();
+        } else if (indexType === 1) {
+          await api.ppp.importNetflix(planType);
+        } else {
+          await api.ppp.importWages();
+          await api.ppp.calculateWorkingHours();
+        }
+        toast.success("PPP data loaded");
+      }
+    } catch (error) {
+      console.error("Failed to ensure PPP data:", error);
+    }
+  };
+
+  const handleIndexChange = async (indexType: number, preferredNetflixPlan?: string) => {
     setUpdatingIndex(true);
     try {
       const api = createApi(getCurrentUserToken);
-      const result = await api.apps.updatePreferredIndex(id, indexType);
+      const result = await api.apps.updatePreferredIndex(id, indexType, preferredNetflixPlan);
       setApp((prev: any) => ({
         ...prev,
         preferredIndexType: result.preferredIndexType,
         preferredIndexTypeValue: result.preferredIndexTypeValue,
+        preferredNetflixPlan: result.preferredNetflixPlan,
       }));
       setShowIndexDropdown(false);
       toast.success(`Pricing index updated to ${INDEX_OPTIONS.find((o) => o.value === indexType)?.label}`);
+
+      // Auto-fetch PPP data if not available
+      ensurePppData(api, indexType, preferredNetflixPlan);
     } catch (error) {
       console.error("Failed to update index:", error);
       toast.error("Failed to update pricing index");
@@ -97,16 +129,24 @@ export default function AppDetailPage() {
       }
 
       if (result.success) {
-        toast.success(`Synced ${result.subscriptionCount} subscriptions with ${result.priceCount} regional prices`);
+        const baseMessage = `Synced ${result.subscriptionCount} subscriptions with ${result.priceCount} regional prices`;
+        const removedMessage =
+          result.deletedSubscriptionCount > 0 || result.deletedPriceCount > 0
+            ? ` Removed ${result.deletedSubscriptionCount} subscriptions and ${result.deletedPriceCount} prices.`
+            : "";
+        const metadataMessage = result.metadataSynced ? " App metadata synced." : " App metadata unchanged.";
+        const snapshotMessage = result.isFullSnapshot ? "" : " Partial upstream snapshot: stale entries were not deleted.";
+
+        toast.success(`${baseMessage}.${removedMessage}${metadataMessage}${snapshotMessage}`);
         // Refresh app data
         const updatedApp = await api.apps.get(id);
         setApp(updatedApp);
       } else {
-        toast.error("Failed to sync subscriptions");
+        toast.error("Failed to sync app data");
       }
     } catch (error) {
-      console.error("Failed to sync subscriptions:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to sync subscriptions");
+      console.error("Failed to sync app data:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to sync app data");
     } finally {
       setSyncing(false);
     }
@@ -197,7 +237,7 @@ export default function AppDetailPage() {
                 {INDEX_OPTIONS.map((option) => (
                   <button
                     key={option.value}
-                    onClick={() => handleIndexChange(option.value)}
+                    onClick={() => handleIndexChange(option.value, app.preferredNetflixPlan || "standard")}
                     className={`w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors first:rounded-t-lg last:rounded-b-lg ${
                       option.value === app.preferredIndexTypeValue ? "bg-muted/30" : ""
                     }`}
@@ -214,6 +254,25 @@ export default function AppDetailPage() {
               </div>
             )}
           </div>
+
+          {app.preferredIndexTypeValue === 1 && (
+            <div className="mt-4 border rounded-lg p-4">
+              <div className="text-sm font-medium mb-3">Netflix plan for multiplier calculation</div>
+              <div className="flex flex-wrap gap-2">
+                {NETFLIX_PLAN_OPTIONS.map((plan) => (
+                  <Button
+                    key={plan.value}
+                    size="sm"
+                    variant={(app.preferredNetflixPlan || "standard") === plan.value ? "default" : "outline"}
+                    disabled={updatingIndex}
+                    onClick={() => handleIndexChange(1, plan.value)}
+                  >
+                    {plan.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -230,12 +289,12 @@ export default function AppDetailPage() {
               {syncing ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Syncing...
+                  Syncing App Data...
                 </>
               ) : (
                 <>
                   <RefreshCw className="mr-2 h-4 w-4" />
-                  Sync Subscriptions
+                  Sync App Data
                 </>
               )}
             </Button>
@@ -245,7 +304,7 @@ export default function AppDetailPage() {
           {app.subscriptions?.length === 0 ? (
             <div className="text-center py-8">
               <p className="text-muted-foreground mb-4">
-                No subscriptions found. Click &quot;Sync Subscriptions&quot; to import your in-app purchases.
+                No subscriptions found. Click &quot;Sync App Data&quot; to import current app metadata and in-app purchases.
               </p>
             </div>
           ) : (

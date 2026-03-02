@@ -162,8 +162,10 @@ See [CLAUDE.md](CLAUDE.md) for complete API documentation.
 | `NEXT_PUBLIC_API_URL` | Backend API URL | Yes |
 | `FIREBASE_PROJECT_ID` | Firebase Project ID (backend) | Yes |
 | `FIREBASE_CREDENTIALS_PATH` | Path to service account JSON | Yes |
-| `GOOGLE_CLIENT_ID` | Google OAuth Client ID | No |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth Client Secret | No |
+| `GOOGLE_CLIENT_ID` | Google OAuth Client ID (Docker Compose friendly) | No |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth Client Secret (Docker Compose friendly) | No |
+| `Google__ClientId` | Google OAuth Client ID (direct `dotnet run`) | No |
+| `Google__ClientSecret` | Google OAuth Client Secret (direct `dotnet run`) | No |
 
 ## Development
 
