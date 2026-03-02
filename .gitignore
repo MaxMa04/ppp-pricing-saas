@@ -51,6 +51,7 @@ coverage/
 # Misc
 *.pem
 .vercel
+.mcp.json
 
 # Additional security patterns
 *.json.bak
