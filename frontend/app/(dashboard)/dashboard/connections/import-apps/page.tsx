@@ -217,9 +217,9 @@ export default function ImportAppsPage() {
 
         <div className="flex">
           <Button variant="outline" asChild>
-            <Link href="/dashboard/connections">
+            <Link href="/dashboard">
               <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Connections
+              Back to Dashboard
             </Link>
           </Button>
         </div>
@@ -314,7 +314,7 @@ export default function ImportAppsPage() {
 
         <div className="flex gap-4">
           <Button variant="outline" asChild>
-            <Link href="/dashboard/connections">
+            <Link href="/dashboard">
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back
             </Link>
@@ -434,7 +434,7 @@ export default function ImportAppsPage() {
 
         <div className="flex gap-4">
           <Button variant="outline" asChild>
-            <Link href="/dashboard/connections">
+            <Link href="/dashboard">
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back
             </Link>

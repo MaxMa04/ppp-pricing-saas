@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { useEffect, useState, useRef } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { createApi } from "@/lib/api/client";
 import { getCurrentUserToken } from "@/lib/firebase/auth";
-import { Search, Download, RefreshCw, Loader2 } from "lucide-react";
+import { Search, RefreshCw, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 type IndexType = "BigMac" | "Netflix" | "BigMacWorkingHours";
@@ -17,26 +17,71 @@ const INDEX_TABS: { id: IndexType; label: string; description: string }[] = [
   { id: "BigMacWorkingHours", label: "Working Hours", description: "Purchasing power measured in work time to buy a Big Mac" },
 ];
 
+async function autoImportForIndex(api: ReturnType<typeof createApi>, indexType: IndexType) {
+  if (indexType === "BigMac") {
+    return api.ppp.importBigMac();
+  } else if (indexType === "Netflix") {
+    return api.ppp.importNetflix();
+  } else {
+    await api.ppp.importWages();
+    return api.ppp.calculateWorkingHours();
+  }
+}
+
 export default function PppDataPage() {
   const [multipliers, setMultipliers] = useState<any[]>([]);
   const [filteredMultipliers, setFilteredMultipliers] = useState<any[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
-  const [importing, setImporting] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<IndexType>("BigMac");
+  const autoImportedRef = useRef<Set<IndexType>>(new Set());
 
-  const fetchMultipliers = async (indexType: IndexType) => {
+  const api = createApi(getCurrentUserToken);
+
+  const fetchMultipliers = async (indexType: IndexType, autoImport = true) => {
     setLoading(true);
     try {
-      const api = createApi(getCurrentUserToken);
       const data = await api.ppp.getMultipliers(indexType);
-      setMultipliers(data);
-      setFilteredMultipliers(data);
+
+      // Auto-import if no data exists and we haven't tried yet for this tab
+      if (data.length === 0 && autoImport && !autoImportedRef.current.has(indexType)) {
+        autoImportedRef.current.add(indexType);
+        try {
+          const result = await autoImportForIndex(api, indexType);
+          toast.success(`Loaded ${result.imported + result.updated} regions`);
+          const freshData = await api.ppp.getMultipliers(indexType);
+          setMultipliers(freshData);
+          setFilteredMultipliers(freshData);
+        } catch (importError) {
+          console.error("Auto-import failed:", importError);
+          toast.error("Failed to load PPP data automatically");
+          setMultipliers([]);
+          setFilteredMultipliers([]);
+        }
+      } else {
+        setMultipliers(data);
+        setFilteredMultipliers(data);
+      }
     } catch (error) {
       console.error("Failed to fetch multipliers:", error instanceof Error ? error.message : "Unknown error");
       toast.error("Failed to load multipliers");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const result = await autoImportForIndex(api, activeTab);
+      toast.success(`Updated: ${result.imported} new, ${result.updated} updated`);
+      await fetchMultipliers(activeTab, false);
+    } catch (error) {
+      console.error("Refresh failed:", error);
+      toast.error(error instanceof Error ? error.message : "Refresh failed");
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -52,40 +97,6 @@ export default function PppDataPage() {
     );
     setFilteredMultipliers(filtered);
   }, [search, multipliers]);
-
-  const handleImport = async (type: "bigmac" | "netflix" | "working-hours") => {
-    setImporting(type);
-    try {
-      const api = createApi(getCurrentUserToken);
-      let result;
-
-      if (type === "bigmac") {
-        result = await api.ppp.importBigMac();
-      } else if (type === "netflix") {
-        result = await api.ppp.importNetflix();
-      } else {
-        // For working hours, first import wages then calculate
-        await api.ppp.importWages();
-        result = await api.ppp.calculateWorkingHours();
-      }
-
-      toast.success(`Import successful: ${result.imported} new, ${result.updated} updated`);
-
-      // Refresh the current tab's data
-      if (
-        (type === "bigmac" && activeTab === "BigMac") ||
-        (type === "netflix" && activeTab === "Netflix") ||
-        (type === "working-hours" && activeTab === "BigMacWorkingHours")
-      ) {
-        fetchMultipliers(activeTab);
-      }
-    } catch (error) {
-      console.error("Import failed:", error);
-      toast.error(error instanceof Error ? error.message : "Import failed");
-    } finally {
-      setImporting(null);
-    }
-  };
 
   return (
     <div className="space-y-8">
@@ -113,83 +124,54 @@ export default function PppDataPage() {
         ))}
       </div>
 
-      {/* Import Section */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Import Data</CardTitle>
-          <CardDescription>
-            {INDEX_TABS.find((t) => t.id === activeTab)?.description}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-3">
-            <Button
-              onClick={() => handleImport("bigmac")}
-              disabled={importing !== null}
-              variant={activeTab === "BigMac" ? "default" : "outline"}
-            >
-              {importing === "bigmac" ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Download className="mr-2 h-4 w-4" />
-              )}
-              Import Big Mac Index
-            </Button>
-            <Button
-              onClick={() => handleImport("netflix")}
-              disabled={importing !== null}
-              variant={activeTab === "Netflix" ? "default" : "outline"}
-            >
-              {importing === "netflix" ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Download className="mr-2 h-4 w-4" />
-              )}
-              Import Netflix Index
-            </Button>
-            <Button
-              onClick={() => handleImport("working-hours")}
-              disabled={importing !== null}
-              variant={activeTab === "BigMacWorkingHours" ? "default" : "outline"}
-            >
-              {importing === "working-hours" ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <RefreshCw className="mr-2 h-4 w-4" />
-              )}
-              Calculate Working Hours
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
       {/* Multipliers Table */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
-            <CardTitle>
-              {INDEX_TABS.find((t) => t.id === activeTab)?.label} Data
-            </CardTitle>
-            <div className="relative w-64">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search by region or country..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="pl-9"
-              />
+            <div>
+              <CardTitle>
+                {INDEX_TABS.find((t) => t.id === activeTab)?.label} Data
+              </CardTitle>
+              <p className="text-sm text-muted-foreground mt-1">
+                {INDEX_TABS.find((t) => t.id === activeTab)?.description}
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="relative w-64">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="Search by region or country..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="pl-9"
+                />
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleRefresh}
+                disabled={refreshing || loading}
+                title="Refresh data"
+              >
+                {refreshing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+              </Button>
             </div>
           </div>
         </CardHeader>
         <CardContent>
           {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+            <div className="flex flex-col items-center justify-center py-12 gap-3">
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              <p className="text-sm text-muted-foreground">Loading PPP data...</p>
             </div>
           ) : filteredMultipliers.length === 0 ? (
             <p className="text-center text-muted-foreground py-8">
               {multipliers.length === 0
-                ? `No ${INDEX_TABS.find((t) => t.id === activeTab)?.label} data available. Click the import button above to get started.`
+                ? "No data available. Data will be loaded automatically when needed."
                 : "No results found."}
             </p>
           ) : (
@@ -200,6 +182,7 @@ export default function PppDataPage() {
                     <th className="py-3 text-left font-medium">Region</th>
                     <th className="py-3 text-left font-medium">Country</th>
                     <th className="py-3 text-right font-medium">Multiplier</th>
+                    {activeTab === "Netflix" && <th className="py-3 text-left font-medium">Plan</th>}
                     <th className="py-3 text-left font-medium">Source</th>
                     <th className="py-3 text-left font-medium">Data Date</th>
                     <th className="py-3 text-left font-medium">Updated</th>
@@ -207,7 +190,7 @@ export default function PppDataPage() {
                 </thead>
                 <tbody>
                   {filteredMultipliers.map((m) => (
-                    <tr key={`${m.regionCode}-${m.indexType}`} className="border-b">
+                    <tr key={`${m.regionCode}-${m.indexType}-${m.planType || "default"}`} className="border-b">
                       <td className="py-3 font-mono">{m.regionCode}</td>
                       <td className="py-3">{m.countryName || "-"}</td>
                       <td className="py-3 text-right">
@@ -225,6 +208,9 @@ export default function PppDataPage() {
                           {(m.multiplier * 100).toFixed(0)}%
                         </span>
                       </td>
+                      {activeTab === "Netflix" && (
+                        <td className="py-3 text-muted-foreground">{m.planType || "standard"}</td>
+                      )}
                       <td className="py-3 text-muted-foreground">
                         {m.source || "-"}
                       </td>

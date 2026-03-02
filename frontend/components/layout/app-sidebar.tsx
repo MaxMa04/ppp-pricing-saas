@@ -5,7 +5,6 @@ import { usePathname, useRouter } from "next/navigation"
 import { useTheme } from "next-themes"
 import {
   LayoutDashboard,
-  Link2,
   AppWindow,
   Calculator,
   Settings,
@@ -45,10 +44,8 @@ import {
 
 const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { name: "Connections", href: "/dashboard/connections", icon: Link2 },
   { name: "Apps", href: "/dashboard/apps", icon: AppWindow },
   { name: "PPP Data", href: "/dashboard/ppp", icon: Calculator },
-  { name: "Settings", href: "/dashboard/settings", icon: Settings },
 ]
 
 export function AppSidebar() {
@@ -148,7 +145,7 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter>
+      <SidebarFooter className="border-t">
         <SidebarMenu>
           <SidebarMenuItem>
             <DropdownMenu>
@@ -170,7 +167,7 @@ export function AppSidebar() {
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent
-                className="w-[--radix-dropdown-menu-trigger-width] min-w-56 rounded-full"
+                className="w-[--radix-dropdown-menu-trigger-width] min-w-56 rounded-lg"
                 side="top"
                 align="start"
                 sideOffset={4}

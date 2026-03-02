@@ -64,7 +64,7 @@ export default function AppsPage() {
               </Button>
             </Link>
           )}
-          <Link href="/dashboard/connections">
+          <Link href="/dashboard">
             <Button variant={hasConnectedStore ? "outline" : "default"}>
               {hasConnectedStore ? "Manage Stores" : "Connect Store"}
             </Button>
@@ -93,7 +93,7 @@ export default function AppsPage() {
               Connect your App Store or Google Play account to import your apps.
             </p>
             <div className="mt-4 flex gap-2">
-              <Link href="/dashboard/connections">
+              <Link href="/dashboard">
                 <Button variant="outline">Connect Store</Button>
               </Link>
               <Link href="/dashboard/connections/import-apps">
