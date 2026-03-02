@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using PppPricing.API.Configuration;
 using PppPricing.API.Data;
 using PppPricing.API.Services;
 using PppPricing.Domain.Models;
+using System.Globalization;
 using System.Text.Json;
 
 namespace PppPricing.API.Controllers;
@@ -14,14 +16,17 @@ public class GooglePlayController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly IConfiguration _configuration;
+    private readonly GoogleOAuthSettingsResolver _googleOAuthSettings;
     private readonly ILogger<GooglePlayController> _logger;
     private readonly HttpClient _httpClient;
     private readonly IMemoryCache _cache;
     private readonly ICredentialEncryptionService _encryptionService;
+    private const string GoogleOAuthConfigHint = "Set Google__ClientId/Google__ClientSecret or GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET.";
 
     public GooglePlayController(
         ApplicationDbContext context,
         IConfiguration configuration,
+        GoogleOAuthSettingsResolver googleOAuthSettings,
         ILogger<GooglePlayController> logger,
         IHttpClientFactory httpClientFactory,
         IMemoryCache cache,
@@ -29,6 +34,7 @@ public class GooglePlayController : ControllerBase
     {
         _context = context;
         _configuration = configuration;
+        _googleOAuthSettings = googleOAuthSettings;
         _logger = logger;
         _httpClient = httpClientFactory.CreateClient();
         _cache = cache;
@@ -58,8 +64,8 @@ public class GooglePlayController : ControllerBase
 
         _logger.LogInformation("GetAuthUrl: User {UserId} requesting OAuth URL", userId);
 
-        var clientId = _configuration["Google:ClientId"];
-        var redirectUri = _configuration["Google:RedirectUri"] ?? $"{Request.Scheme}://{Request.Host}/api/google-play/auth/callback";
+        var clientId = _googleOAuthSettings.GetClientId();
+        var redirectUri = _googleOAuthSettings.GetRedirectUri(Request);
 
         _logger.LogDebug("Google OAuth config - ClientId present: {HasClientId}, RedirectUri: {RedirectUri}",
             !string.IsNullOrEmpty(clientId), redirectUri);
@@ -67,7 +73,7 @@ public class GooglePlayController : ControllerBase
         if (string.IsNullOrEmpty(clientId))
         {
             _logger.LogError("Google OAuth not configured - ClientId is missing");
-            return BadRequest(new { error = "Google OAuth not configured" });
+            return BadRequest(new { error = "Google OAuth not configured", details = GoogleOAuthConfigHint });
         }
 
         var scope = "https://www.googleapis.com/auth/androidpublisher";
@@ -114,13 +120,13 @@ public class GooglePlayController : ControllerBase
         }
         _cache.Remove($"oauth_state_{userId}");
 
-        var clientId = _configuration["Google:ClientId"];
-        var clientSecret = _configuration["Google:ClientSecret"];
-        var redirectUri = _configuration["Google:RedirectUri"] ?? $"{Request.Scheme}://{Request.Host}/api/google-play/auth/callback";
+        var clientId = _googleOAuthSettings.GetClientId();
+        var clientSecret = _googleOAuthSettings.GetClientSecret();
+        var redirectUri = _googleOAuthSettings.GetRedirectUri(Request);
 
         if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
         {
-            return BadRequest(new { error = "Google OAuth not configured" });
+            return BadRequest(new { error = "Google OAuth not configured", details = GoogleOAuthConfigHint });
         }
 
         // Exchange code for tokens
@@ -191,7 +197,7 @@ public class GooglePlayController : ControllerBase
         _logger.LogInformation("OAuth GET callback received with state: {State}", state);
 
         var frontendUrl = _configuration["Frontend:BaseUrl"] ?? "http://localhost:3009";
-        var redirectBase = $"{frontendUrl}/dashboard/connections";
+        var redirectBase = $"{frontendUrl}/dashboard";
 
         if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(state))
         {
@@ -225,9 +231,9 @@ public class GooglePlayController : ControllerBase
             return Redirect($"{redirectBase}?google=error&message=User+not+found");
         }
 
-        var clientId = _configuration["Google:ClientId"];
-        var clientSecret = _configuration["Google:ClientSecret"];
-        var redirectUri = _configuration["Google:RedirectUri"] ?? $"{Request.Scheme}://{Request.Host}/api/google-play/auth/callback";
+        var clientId = _googleOAuthSettings.GetClientId();
+        var clientSecret = _googleOAuthSettings.GetClientSecret();
+        var redirectUri = _googleOAuthSettings.GetRedirectUri(Request);
 
         if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
         {
@@ -470,8 +476,8 @@ public class GooglePlayController : ControllerBase
             return null;
         }
 
-        var clientId = _configuration["Google:ClientId"];
-        var clientSecret = _configuration["Google:ClientSecret"];
+        var clientId = _googleOAuthSettings.GetClientId();
+        var clientSecret = _googleOAuthSettings.GetClientSecret();
 
         if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
         {
@@ -622,6 +628,14 @@ public class GooglePlayController : ControllerBase
 
         try
         {
+            var metadataSynced = false;
+            var appNameBefore = app.AppName;
+            var syncedAppName = await TryGetGooglePlayAppName(packageName);
+            if (!string.IsNullOrWhiteSpace(syncedAppName))
+            {
+                metadataSynced = true;
+            }
+
             // Fetch subscriptions from Google Play API
             var subscriptionsUrl = $"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{packageName}/subscriptions";
             var response = await _httpClient.GetAsync(subscriptionsUrl);
@@ -637,132 +651,191 @@ public class GooglePlayController : ControllerBase
             var content = await response.Content.ReadAsStringAsync();
             var subscriptionsJson = JsonSerializer.Deserialize<JsonElement>(content);
 
-            var syncedSubscriptions = new List<object>();
-            var syncedPrices = 0;
+            var subscriptionSnapshots = new List<GooglePlaySubscriptionSnapshot>();
 
             if (subscriptionsJson.TryGetProperty("subscriptions", out var subscriptionsArray))
             {
                 foreach (var subJson in subscriptionsArray.EnumerateArray())
                 {
                     var productId = subJson.GetProperty("productId").GetString() ?? "";
-
-                    // Process each base plan
-                    if (subJson.TryGetProperty("basePlans", out var basePlansArray))
+                    if (string.IsNullOrWhiteSpace(productId))
                     {
-                        foreach (var basePlanJson in basePlansArray.EnumerateArray())
+                        continue;
+                    }
+                    if (!subJson.TryGetProperty("basePlans", out var basePlansArray))
+                    {
+                        continue;
+                    }
+
+                    foreach (var basePlanJson in basePlansArray.EnumerateArray())
+                    {
+                        var basePlanId = basePlanJson.GetProperty("basePlanId").GetString() ?? "";
+                        string? billingPeriod = null;
+                        if (basePlanJson.TryGetProperty("autoRenewingBasePlanType", out var autoRenewing) &&
+                            autoRenewing.TryGetProperty("billingPeriodDuration", out var autoDuration))
                         {
-                            var basePlanId = basePlanJson.GetProperty("basePlanId").GetString() ?? "";
-
-                            // Get billing period from auto-renewing or prepaid config
-                            string? billingPeriod = null;
-                            if (basePlanJson.TryGetProperty("autoRenewingBasePlanType", out var autoRenewing))
-                            {
-                                if (autoRenewing.TryGetProperty("billingPeriodDuration", out var duration))
-                                {
-                                    billingPeriod = ParseBillingPeriod(duration.GetString());
-                                }
-                            }
-                            else if (basePlanJson.TryGetProperty("prepaidBasePlanType", out var prepaid))
-                            {
-                                if (prepaid.TryGetProperty("billingPeriodDuration", out var duration))
-                                {
-                                    billingPeriod = ParseBillingPeriod(duration.GetString());
-                                }
-                            }
-
-                            // Find or create subscription
-                            var subscription = app.Subscriptions
-                                .FirstOrDefault(s => s.ProductId == productId && s.BasePlanId == basePlanId);
-
-                            if (subscription == null)
-                            {
-                                subscription = new Subscription
-                                {
-                                    Id = Guid.NewGuid(),
-                                    AppId = app.Id,
-                                    ProductId = productId,
-                                    BasePlanId = basePlanId,
-                                    BillingPeriod = billingPeriod,
-                                    CreatedAt = DateTime.UtcNow,
-                                    UpdatedAt = DateTime.UtcNow
-                                };
-                                _context.Subscriptions.Add(subscription);
-                                app.Subscriptions.Add(subscription);
-                            }
-                            else
-                            {
-                                subscription.BillingPeriod = billingPeriod;
-                                subscription.UpdatedAt = DateTime.UtcNow;
-                            }
-
-                            // Process regional prices
-                            if (basePlanJson.TryGetProperty("regionalConfigs", out var regionalConfigs))
-                            {
-                                foreach (var regionConfig in regionalConfigs.EnumerateArray())
-                                {
-                                    var regionCode = regionConfig.GetProperty("regionCode").GetString() ?? "";
-
-                                    decimal? price = null;
-                                    string? currencyCode = null;
-
-                                    if (regionConfig.TryGetProperty("price", out var priceJson))
-                                    {
-                                        currencyCode = priceJson.TryGetProperty("currencyCode", out var cc)
-                                            ? cc.GetString()
-                                            : null;
-
-                                        // Parse price from units and nanos
-                                        var units = priceJson.TryGetProperty("units", out var u)
-                                            ? long.Parse(u.GetString() ?? "0")
-                                            : 0;
-                                        var nanos = priceJson.TryGetProperty("nanos", out var n)
-                                            ? n.GetInt32()
-                                            : 0;
-                                        price = units + (nanos / 1_000_000_000m);
-                                    }
-
-                                    // Find or create price record
-                                    var subscriptionPrice = subscription.Prices
-                                        .FirstOrDefault(p => p.RegionCode == regionCode);
-
-                                    if (subscriptionPrice == null)
-                                    {
-                                        subscriptionPrice = new SubscriptionPrice
-                                        {
-                                            Id = Guid.NewGuid(),
-                                            SubscriptionId = subscription.Id,
-                                            RegionCode = regionCode,
-                                            CurrencyCode = currencyCode ?? "",
-                                            CurrentPrice = price,
-                                            LastSyncedAt = DateTime.UtcNow
-                                        };
-                                        _context.SubscriptionPrices.Add(subscriptionPrice);
-                                        subscription.Prices.Add(subscriptionPrice);
-                                    }
-                                    else
-                                    {
-                                        subscriptionPrice.CurrentPrice = price;
-                                        subscriptionPrice.CurrencyCode = currencyCode ?? subscriptionPrice.CurrencyCode;
-                                        subscriptionPrice.LastSyncedAt = DateTime.UtcNow;
-                                    }
-                                    syncedPrices++;
-                                }
-                            }
-
-                            syncedSubscriptions.Add(new
-                            {
-                                id = subscription.Id,
-                                productId,
-                                basePlanId,
-                                billingPeriod,
-                                priceCount = subscription.Prices.Count
-                            });
+                            billingPeriod = ParseBillingPeriod(autoDuration.GetString());
                         }
+                        else if (basePlanJson.TryGetProperty("prepaidBasePlanType", out var prepaid) &&
+                                 prepaid.TryGetProperty("billingPeriodDuration", out var prepaidDuration))
+                        {
+                            billingPeriod = ParseBillingPeriod(prepaidDuration.GetString());
+                        }
+
+                        var priceSnapshots = new List<GooglePlayPriceSnapshot>();
+                        if (basePlanJson.TryGetProperty("regionalConfigs", out var regionalConfigs))
+                        {
+                            foreach (var regionConfig in regionalConfigs.EnumerateArray())
+                            {
+                                var apiRegionCode = regionConfig.GetProperty("regionCode").GetString() ?? "";
+                                var regionCode = RegionCodeNormalizer.NormalizeToAlpha3(apiRegionCode) ?? apiRegionCode.ToUpperInvariant();
+
+                                decimal? price = null;
+                                var currencyCode = "";
+
+                                if (regionConfig.TryGetProperty("price", out var priceJson))
+                                {
+                                    if (priceJson.TryGetProperty("currencyCode", out var cc))
+                                    {
+                                        currencyCode = cc.GetString() ?? "";
+                                    }
+
+                                    var units = 0L;
+                                    if (priceJson.TryGetProperty("units", out var unitsProp) &&
+                                        long.TryParse(unitsProp.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedUnits))
+                                    {
+                                        units = parsedUnits;
+                                    }
+
+                                    var nanos = 0;
+                                    if (priceJson.TryGetProperty("nanos", out var nanosProp))
+                                    {
+                                        nanos = nanosProp.GetInt32();
+                                    }
+
+                                    price = units + (nanos / 1_000_000_000m);
+                                }
+
+                                priceSnapshots.Add(new GooglePlayPriceSnapshot(regionCode, currencyCode, price));
+                            }
+                        }
+
+                        subscriptionSnapshots.Add(new GooglePlaySubscriptionSnapshot(productId, basePlanId, billingPeriod, priceSnapshots));
                     }
                 }
             }
 
+            var syncedSubscriptions = new List<object>();
+            var syncedPrices = 0;
+            var deletedSubscriptionCount = 0;
+            var deletedPriceCount = 0;
+            var now = DateTime.UtcNow;
+
+            await using var tx = await _context.Database.BeginTransactionAsync();
+
+            if (!string.IsNullOrWhiteSpace(syncedAppName))
+            {
+                app.AppName = syncedAppName;
+            }
+            app.PackageName = packageName;
+            app.UpdatedAt = now;
+
+            var existingSubscriptionsByKey = app.Subscriptions
+                .GroupBy(s => BuildGoogleSubscriptionKey(s.ProductId, s.BasePlanId), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            var seenSubscriptionKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var snapshot in subscriptionSnapshots)
+            {
+                var subscriptionKey = BuildGoogleSubscriptionKey(snapshot.ProductId, snapshot.BasePlanId);
+                seenSubscriptionKeys.Add(subscriptionKey);
+
+                if (!existingSubscriptionsByKey.TryGetValue(subscriptionKey, out var subscription))
+                {
+                    subscription = new Subscription
+                    {
+                        Id = Guid.NewGuid(),
+                        AppId = app.Id,
+                        ProductId = snapshot.ProductId,
+                        BasePlanId = snapshot.BasePlanId,
+                        BillingPeriod = snapshot.BillingPeriod,
+                        CreatedAt = now,
+                        UpdatedAt = now
+                    };
+                    _context.Subscriptions.Add(subscription);
+                    app.Subscriptions.Add(subscription);
+                    existingSubscriptionsByKey[subscriptionKey] = subscription;
+                }
+                else
+                {
+                    subscription.BillingPeriod = snapshot.BillingPeriod;
+                    subscription.UpdatedAt = now;
+                }
+
+                var existingPricesByRegion = subscription.Prices
+                    .GroupBy(p => p.RegionCode, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+                var seenRegions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var priceSnapshot in snapshot.Prices)
+                {
+                    seenRegions.Add(priceSnapshot.RegionCode);
+
+                    if (!existingPricesByRegion.TryGetValue(priceSnapshot.RegionCode, out var subscriptionPrice))
+                    {
+                        subscriptionPrice = new SubscriptionPrice
+                        {
+                            Id = Guid.NewGuid(),
+                            SubscriptionId = subscription.Id,
+                            RegionCode = priceSnapshot.RegionCode,
+                            CurrencyCode = priceSnapshot.CurrencyCode,
+                            CurrentPrice = priceSnapshot.Price,
+                            LastSyncedAt = now
+                        };
+                        _context.SubscriptionPrices.Add(subscriptionPrice);
+                        subscription.Prices.Add(subscriptionPrice);
+                        existingPricesByRegion[priceSnapshot.RegionCode] = subscriptionPrice;
+                    }
+                    else
+                    {
+                        subscriptionPrice.CurrentPrice = priceSnapshot.Price;
+                        subscriptionPrice.CurrencyCode = priceSnapshot.CurrencyCode;
+                        subscriptionPrice.LastSyncedAt = now;
+                    }
+                    syncedPrices++;
+                }
+
+                var stalePrices = subscription.Prices
+                    .Where(p => !seenRegions.Contains(p.RegionCode))
+                    .ToList();
+                if (stalePrices.Count > 0)
+                {
+                    deletedPriceCount += stalePrices.Count;
+                    _context.SubscriptionPrices.RemoveRange(stalePrices);
+                }
+
+                syncedSubscriptions.Add(new
+                {
+                    id = subscription.Id,
+                    productId = snapshot.ProductId,
+                    basePlanId = snapshot.BasePlanId,
+                    billingPeriod = snapshot.BillingPeriod,
+                    priceCount = seenRegions.Count
+                });
+            }
+
+            var staleSubscriptions = app.Subscriptions
+                .Where(s => !seenSubscriptionKeys.Contains(BuildGoogleSubscriptionKey(s.ProductId, s.BasePlanId)))
+                .ToList();
+            foreach (var staleSubscription in staleSubscriptions)
+            {
+                deletedSubscriptionCount++;
+                deletedPriceCount += staleSubscription.Prices.Count;
+                _context.Subscriptions.Remove(staleSubscription);
+            }
+
             await _context.SaveChangesAsync();
+            await tx.CommitAsync();
 
             _logger.LogInformation("Synced {SubscriptionCount} subscriptions with {PriceCount} prices for {PackageName}",
                 syncedSubscriptions.Count, syncedPrices, packageName);
@@ -772,6 +845,12 @@ public class GooglePlayController : ControllerBase
                 success = true,
                 subscriptionCount = syncedSubscriptions.Count,
                 priceCount = syncedPrices,
+                metadataSynced,
+                deletedSubscriptionCount,
+                deletedPriceCount,
+                isFullSnapshot = true,
+                appNameBefore,
+                appNameAfter = app.AppName,
                 subscriptions = syncedSubscriptions
             });
         }
@@ -781,6 +860,79 @@ public class GooglePlayController : ControllerBase
             return BadRequest(new { error = "Failed to sync subscriptions", details = ex.Message });
         }
     }
+
+    private async Task<string?> TryGetGooglePlayAppName(string packageName)
+    {
+        try
+        {
+            var createEditResponse = await _httpClient.PostAsync(
+                $"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{packageName}/edits",
+                new StringContent("{}", System.Text.Encoding.UTF8, "application/json"));
+
+            if (!createEditResponse.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Failed to create edit while syncing metadata for {PackageName}", packageName);
+                return null;
+            }
+
+            var editContent = await createEditResponse.Content.ReadAsStringAsync();
+            var editJson = JsonSerializer.Deserialize<JsonElement>(editContent);
+            var editId = editJson.GetProperty("id").GetString();
+            if (string.IsNullOrEmpty(editId))
+            {
+                return null;
+            }
+
+            try
+            {
+                var detailsResponse = await _httpClient.GetAsync(
+                    $"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{packageName}/edits/{editId}/details");
+                if (!detailsResponse.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                var detailsContent = await detailsResponse.Content.ReadAsStringAsync();
+                var detailsJson = JsonSerializer.Deserialize<JsonElement>(detailsContent);
+                if (!detailsJson.TryGetProperty("defaultLanguage", out var languageProp))
+                {
+                    return null;
+                }
+
+                var language = languageProp.GetString();
+                if (string.IsNullOrEmpty(language))
+                {
+                    return null;
+                }
+
+                var listingResponse = await _httpClient.GetAsync(
+                    $"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{packageName}/edits/{editId}/listings/{language}");
+                if (!listingResponse.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                var listingContent = await listingResponse.Content.ReadAsStringAsync();
+                var listingJson = JsonSerializer.Deserialize<JsonElement>(listingContent);
+                return listingJson.TryGetProperty("title", out var titleProp)
+                    ? titleProp.GetString()
+                    : null;
+            }
+            finally
+            {
+                await _httpClient.DeleteAsync(
+                    $"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{packageName}/edits/{editId}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to sync Google Play metadata for {PackageName}", packageName);
+            return null;
+        }
+    }
+
+    private static string BuildGoogleSubscriptionKey(string productId, string? basePlanId)
+        => $"{productId}::{basePlanId ?? string.Empty}";
 
     private static string? ParseBillingPeriod(string? duration)
     {
@@ -797,6 +949,17 @@ public class GooglePlayController : ControllerBase
             _ => duration
         };
     }
+
+    private sealed record GooglePlaySubscriptionSnapshot(
+        string ProductId,
+        string BasePlanId,
+        string? BillingPeriod,
+        List<GooglePlayPriceSnapshot> Prices);
+
+    private sealed record GooglePlayPriceSnapshot(
+        string RegionCode,
+        string CurrencyCode,
+        decimal? Price);
 }
 
 public class OAuthCallbackRequest

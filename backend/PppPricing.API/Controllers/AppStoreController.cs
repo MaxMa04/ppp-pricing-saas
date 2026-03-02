@@ -3,8 +3,10 @@ using Microsoft.EntityFrameworkCore;
 using PppPricing.API.Data;
 using PppPricing.API.Services;
 using PppPricing.Domain.Models;
+using System.Globalization;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Microsoft.IdentityModel.Tokens;
 
 namespace PppPricing.API.Controllers;
@@ -351,17 +353,39 @@ public class AppStoreController : ControllerBase
         try
         {
             var privateKey = _encryptionService.Decrypt(connection.ApplePrivateKeyEncrypted);
-            var token = GenerateJwtToken(connection.AppleKeyId!, connection.AppleIssuerId!, privateKey);
+            AppStoreMetadataSnapshot? metadataSnapshot = null;
+            var metadataSynced = false;
+            var appNameBefore = app.AppName;
 
-            _httpClient.DefaultRequestHeaders.Clear();
-            _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}");
+            var appMetadataResponse = await SendAppleRequest(connection.AppleKeyId!, connection.AppleIssuerId!, privateKey, $"https://api.appstoreconnect.apple.com/v1/apps/{appStoreId}");
+            if (appMetadataResponse.IsSuccessStatusCode)
+            {
+                var appMetadataContent = await appMetadataResponse.Content.ReadAsStringAsync();
+                var appMetadataJson = JsonDocument.Parse(appMetadataContent);
+                var appData = appMetadataJson.RootElement.GetProperty("data");
+                var attributes = appData.GetProperty("attributes");
+
+                metadataSnapshot = new AppStoreMetadataSnapshot(
+                    AppName: attributes.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null,
+                    BundleId: attributes.TryGetProperty("bundleId", out var bundleProp) ? bundleProp.GetString() : null,
+                    AppStoreId: appData.TryGetProperty("id", out var idProp) ? idProp.GetString() : appStoreId);
+                metadataSynced = true;
+            }
+            else
+            {
+                _logger.LogWarning("Failed to fetch metadata for App Store app {AppStoreId}. Continuing with subscription sync.", appStoreId);
+            }
 
             var syncedSubscriptions = new List<object>();
             var syncedPrices = 0;
+            var deletedSubscriptionCount = 0;
+            var deletedPriceCount = 0;
+            var isFullSnapshot = true;
+            var now = DateTime.UtcNow;
 
             // Step 1: Get subscription groups for the app
             var groupsUrl = $"https://api.appstoreconnect.apple.com/v1/apps/{appStoreId}/subscriptionGroups?limit=200";
-            var groupsResponse = await _httpClient.GetAsync(groupsUrl);
+            var groupsResponse = await SendAppleRequest(connection.AppleKeyId!, connection.AppleIssuerId!, privateKey, groupsUrl);
 
             if (!groupsResponse.IsSuccessStatusCode)
             {
@@ -372,88 +396,64 @@ public class AppStoreController : ControllerBase
             }
 
             var groupsContent = await groupsResponse.Content.ReadAsStringAsync();
-            var groupsJson = System.Text.Json.JsonDocument.Parse(groupsContent);
+            var groupsJson = JsonDocument.Parse(groupsContent);
+            var subscriptionSnapshots = new List<AppStoreSubscriptionSnapshot>();
 
             foreach (var group in groupsJson.RootElement.GetProperty("data").EnumerateArray())
             {
                 var groupId = group.GetProperty("id").GetString();
-
-                // Step 2: Get subscriptions for each group
-                // Regenerate token to ensure it's fresh (Apple tokens expire in 20 min)
-                token = GenerateJwtToken(connection.AppleKeyId!, connection.AppleIssuerId!, privateKey);
-                _httpClient.DefaultRequestHeaders.Clear();
-                _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}");
+                if (string.IsNullOrEmpty(groupId))
+                {
+                    continue;
+                }
 
                 var subscriptionsUrl = $"https://api.appstoreconnect.apple.com/v1/subscriptionGroups/{groupId}/subscriptions?limit=200";
-                var subscriptionsResponse = await _httpClient.GetAsync(subscriptionsUrl);
+                var subscriptionsResponse = await SendAppleRequest(connection.AppleKeyId!, connection.AppleIssuerId!, privateKey, subscriptionsUrl);
 
                 if (!subscriptionsResponse.IsSuccessStatusCode)
                 {
                     _logger.LogWarning("Failed to fetch subscriptions for group {GroupId}", groupId);
+                    isFullSnapshot = false;
                     continue;
                 }
 
                 var subscriptionsContent = await subscriptionsResponse.Content.ReadAsStringAsync();
-                var subscriptionsJson = System.Text.Json.JsonDocument.Parse(subscriptionsContent);
+                var subscriptionsJson = JsonDocument.Parse(subscriptionsContent);
 
                 foreach (var subData in subscriptionsJson.RootElement.GetProperty("data").EnumerateArray())
                 {
                     var subscriptionId = subData.GetProperty("id").GetString() ?? "";
                     var attributes = subData.GetProperty("attributes");
                     var productId = attributes.GetProperty("productId").GetString() ?? "";
+                    if (string.IsNullOrWhiteSpace(productId))
+                    {
+                        continue;
+                    }
                     var name = attributes.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
                     var subscriptionPeriod = attributes.TryGetProperty("subscriptionPeriod", out var periodProp)
                         ? ParseAppleBillingPeriod(periodProp.GetString())
                         : null;
 
-                    // Find or create subscription
-                    var subscription = app.Subscriptions
-                        .FirstOrDefault(s => s.ProductId == productId);
+                    var priceSnapshots = new List<AppStorePriceSnapshot>();
 
-                    if (subscription == null)
-                    {
-                        subscription = new Subscription
-                        {
-                            Id = Guid.NewGuid(),
-                            AppId = app.Id,
-                            ProductId = productId,
-                            Name = name,
-                            BillingPeriod = subscriptionPeriod,
-                            CreatedAt = DateTime.UtcNow,
-                            UpdatedAt = DateTime.UtcNow
-                        };
-                        _context.Subscriptions.Add(subscription);
-                        app.Subscriptions.Add(subscription);
-                    }
-                    else
-                    {
-                        subscription.Name = name ?? subscription.Name;
-                        subscription.BillingPeriod = subscriptionPeriod ?? subscription.BillingPeriod;
-                        subscription.UpdatedAt = DateTime.UtcNow;
-                    }
-
-                    // Step 3: Get prices for each subscription
                     // Add small delay to avoid rate limiting (Apple ~300 req/min)
                     await Task.Delay(200);
 
-                    token = GenerateJwtToken(connection.AppleKeyId!, connection.AppleIssuerId!, privateKey);
-                    _httpClient.DefaultRequestHeaders.Clear();
-                    _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}");
-
                     var pricesUrl = $"https://api.appstoreconnect.apple.com/v1/subscriptions/{subscriptionId}/prices?include=subscriptionPricePoint,territory&limit=200";
-                    var pricesResponse = await _httpClient.GetAsync(pricesUrl);
+                    var pricesResponse = await SendAppleRequest(connection.AppleKeyId!, connection.AppleIssuerId!, privateKey, pricesUrl);
 
                     if (!pricesResponse.IsSuccessStatusCode)
                     {
                         _logger.LogWarning("Failed to fetch prices for subscription {SubscriptionId}", subscriptionId);
+                        isFullSnapshot = false;
+                        subscriptionSnapshots.Add(new AppStoreSubscriptionSnapshot(productId, name, subscriptionPeriod, priceSnapshots));
                         continue;
                     }
 
                     var pricesContent = await pricesResponse.Content.ReadAsStringAsync();
-                    var pricesJson = System.Text.Json.JsonDocument.Parse(pricesContent);
+                    var pricesJson = JsonDocument.Parse(pricesContent);
 
-                    // Parse included data for price points and territories
-                    var pricePoints = new Dictionary<string, (decimal price, string currency)>();
+                    var pricePoints = new Dictionary<string, decimal>();
                     var territories = new Dictionary<string, string>();
 
                     if (pricesJson.RootElement.TryGetProperty("included", out var included))
@@ -465,21 +465,19 @@ public class AppStoreController : ControllerBase
 
                             if (type == "subscriptionPricePoints" && item.TryGetProperty("attributes", out var ppAttrs))
                             {
-                                var customerPrice = ppAttrs.TryGetProperty("customerPrice", out var cp)
-                                    ? decimal.Parse(cp.GetString() ?? "0")
-                                    : 0;
-                                var currency = ppAttrs.TryGetProperty("proceeds", out var proceeds)
-                                    ? "USD" // Default, actual currency comes from territory
-                                    : "USD";
-
-                                pricePoints[itemId] = (customerPrice, currency);
+                                if (ppAttrs.TryGetProperty("customerPrice", out var cp) &&
+                                    decimal.TryParse(cp.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out var customerPrice))
+                                {
+                                    pricePoints[itemId] = customerPrice;
+                                }
                             }
                             else if (type == "territories" && item.TryGetProperty("attributes", out var terrAttrs))
                             {
                                 var currency = terrAttrs.TryGetProperty("currency", out var curr)
                                     ? curr.GetString() ?? "USD"
                                     : "USD";
-                                territories[itemId] = currency;
+                                var normalizedTerritoryId = RegionCodeNormalizer.NormalizeToAlpha3(itemId) ?? itemId;
+                                territories[normalizedTerritoryId] = currency;
                             }
                         }
                     }
@@ -487,76 +485,162 @@ public class AppStoreController : ControllerBase
                     foreach (var priceData in pricesJson.RootElement.GetProperty("data").EnumerateArray())
                     {
                         if (!priceData.TryGetProperty("relationships", out var relationships))
+                        {
                             continue;
+                        }
 
                         string? regionCode = null;
                         decimal? price = null;
                         string? currencyCode = null;
 
-                        // Get territory
                         if (relationships.TryGetProperty("territory", out var territoryRel) &&
                             territoryRel.TryGetProperty("data", out var terrData))
                         {
-                            regionCode = terrData.GetProperty("id").GetString();
+                            var apiRegionCode = terrData.GetProperty("id").GetString();
+                            regionCode = RegionCodeNormalizer.NormalizeToAlpha3(apiRegionCode) ?? apiRegionCode;
                             if (regionCode != null && territories.TryGetValue(regionCode, out var terrCurrency))
                             {
                                 currencyCode = terrCurrency;
                             }
                         }
 
-                        // Get price point
                         if (relationships.TryGetProperty("subscriptionPricePoint", out var pricePointRel) &&
                             pricePointRel.TryGetProperty("data", out var ppData))
                         {
                             var ppId = ppData.GetProperty("id").GetString();
-                            if (ppId != null && pricePoints.TryGetValue(ppId, out var pp))
+                            if (ppId != null && pricePoints.TryGetValue(ppId, out var resolvedPrice))
                             {
-                                price = pp.price;
+                                price = resolvedPrice;
                             }
                         }
 
                         if (string.IsNullOrEmpty(regionCode))
+                        {
                             continue;
-
-                        // Find or create price record
-                        var subscriptionPrice = subscription.Prices
-                            .FirstOrDefault(p => p.RegionCode == regionCode);
-
-                        if (subscriptionPrice == null)
-                        {
-                            subscriptionPrice = new SubscriptionPrice
-                            {
-                                Id = Guid.NewGuid(),
-                                SubscriptionId = subscription.Id,
-                                RegionCode = regionCode,
-                                CurrencyCode = currencyCode ?? "USD",
-                                CurrentPrice = price,
-                                LastSyncedAt = DateTime.UtcNow
-                            };
-                            _context.SubscriptionPrices.Add(subscriptionPrice);
-                            subscription.Prices.Add(subscriptionPrice);
                         }
-                        else
-                        {
-                            subscriptionPrice.CurrentPrice = price;
-                            subscriptionPrice.CurrencyCode = currencyCode ?? subscriptionPrice.CurrencyCode;
-                            subscriptionPrice.LastSyncedAt = DateTime.UtcNow;
-                        }
-                        syncedPrices++;
+
+                        priceSnapshots.Add(new AppStorePriceSnapshot(regionCode, currencyCode ?? "USD", price));
                     }
 
-                    syncedSubscriptions.Add(new
+                    subscriptionSnapshots.Add(new AppStoreSubscriptionSnapshot(productId, name, subscriptionPeriod, priceSnapshots));
+                }
+            }
+
+            await using var tx = await _context.Database.BeginTransactionAsync();
+
+            if (metadataSnapshot != null)
+            {
+                if (!string.IsNullOrWhiteSpace(metadataSnapshot.AppName))
+                {
+                    app.AppName = metadataSnapshot.AppName;
+                }
+                app.BundleId = metadataSnapshot.BundleId ?? app.BundleId;
+                app.AppStoreId = metadataSnapshot.AppStoreId ?? app.AppStoreId;
+            }
+            app.UpdatedAt = now;
+
+            var existingSubscriptionsByProductId = app.Subscriptions
+                .GroupBy(s => s.ProductId, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            var seenProductIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var snapshot in subscriptionSnapshots)
+            {
+                seenProductIds.Add(snapshot.ProductId);
+
+                if (!existingSubscriptionsByProductId.TryGetValue(snapshot.ProductId, out var subscription))
+                {
+                    subscription = new Subscription
                     {
-                        id = subscription.Id,
-                        productId,
-                        name,
-                        billingPeriod = subscriptionPeriod,
-                        priceCount = subscription.Prices.Count
-                    });
+                        Id = Guid.NewGuid(),
+                        AppId = app.Id,
+                        ProductId = snapshot.ProductId,
+                        Name = snapshot.Name,
+                        BillingPeriod = snapshot.BillingPeriod,
+                        CreatedAt = now,
+                        UpdatedAt = now
+                    };
+                    _context.Subscriptions.Add(subscription);
+                    app.Subscriptions.Add(subscription);
+                    existingSubscriptionsByProductId[snapshot.ProductId] = subscription;
+                }
+                else
+                {
+                    subscription.Name = snapshot.Name ?? subscription.Name;
+                    subscription.BillingPeriod = snapshot.BillingPeriod ?? subscription.BillingPeriod;
+                    subscription.UpdatedAt = now;
+                }
+
+                var existingPricesByRegion = subscription.Prices
+                    .GroupBy(p => p.RegionCode, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+                var seenRegions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var priceSnapshot in snapshot.Prices)
+                {
+                    seenRegions.Add(priceSnapshot.RegionCode);
+
+                    if (!existingPricesByRegion.TryGetValue(priceSnapshot.RegionCode, out var subscriptionPrice))
+                    {
+                        subscriptionPrice = new SubscriptionPrice
+                        {
+                            Id = Guid.NewGuid(),
+                            SubscriptionId = subscription.Id,
+                            RegionCode = priceSnapshot.RegionCode,
+                            CurrencyCode = priceSnapshot.CurrencyCode,
+                            CurrentPrice = priceSnapshot.Price,
+                            LastSyncedAt = now
+                        };
+                        _context.SubscriptionPrices.Add(subscriptionPrice);
+                        subscription.Prices.Add(subscriptionPrice);
+                        existingPricesByRegion[priceSnapshot.RegionCode] = subscriptionPrice;
+                    }
+                    else
+                    {
+                        subscriptionPrice.CurrentPrice = priceSnapshot.Price;
+                        subscriptionPrice.CurrencyCode = priceSnapshot.CurrencyCode;
+                        subscriptionPrice.LastSyncedAt = now;
+                    }
+                    syncedPrices++;
+                }
+
+                if (isFullSnapshot)
+                {
+                    var stalePrices = subscription.Prices
+                        .Where(p => !seenRegions.Contains(p.RegionCode))
+                        .ToList();
+                    if (stalePrices.Count > 0)
+                    {
+                        deletedPriceCount += stalePrices.Count;
+                        _context.SubscriptionPrices.RemoveRange(stalePrices);
+                    }
+                }
+
+                syncedSubscriptions.Add(new
+                {
+                    id = subscription.Id,
+                    productId = snapshot.ProductId,
+                    name = snapshot.Name,
+                    billingPeriod = snapshot.BillingPeriod,
+                    priceCount = seenRegions.Count
+                });
+            }
+
+            if (isFullSnapshot)
+            {
+                var staleSubscriptions = app.Subscriptions
+                    .Where(s => !seenProductIds.Contains(s.ProductId))
+                    .ToList();
+                foreach (var staleSubscription in staleSubscriptions)
+                {
+                    deletedSubscriptionCount++;
+                    deletedPriceCount += staleSubscription.Prices.Count;
+                    _context.Subscriptions.Remove(staleSubscription);
                 }
             }
 
             await _context.SaveChangesAsync();
+            await tx.CommitAsync();
 
             _logger.LogInformation("Synced {SubscriptionCount} subscriptions with {PriceCount} prices for App Store app {AppStoreId}",
                 syncedSubscriptions.Count, syncedPrices, appStoreId);
@@ -566,6 +650,12 @@ public class AppStoreController : ControllerBase
                 success = true,
                 subscriptionCount = syncedSubscriptions.Count,
                 priceCount = syncedPrices,
+                metadataSynced,
+                deletedSubscriptionCount,
+                deletedPriceCount,
+                isFullSnapshot,
+                appNameBefore,
+                appNameAfter = app.AppName,
                 subscriptions = syncedSubscriptions
             });
         }
@@ -575,6 +665,31 @@ public class AppStoreController : ControllerBase
             return BadRequest(new { error = "Failed to sync subscriptions", details = ex.Message });
         }
     }
+
+    private async Task<HttpResponseMessage> SendAppleRequest(string keyId, string issuerId, string privateKey, string url)
+    {
+        var token = GenerateJwtToken(keyId, issuerId, privateKey);
+
+        _httpClient.DefaultRequestHeaders.Clear();
+        _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}");
+        return await _httpClient.GetAsync(url);
+    }
+
+    private sealed record AppStoreMetadataSnapshot(
+        string? AppName,
+        string? BundleId,
+        string? AppStoreId);
+
+    private sealed record AppStoreSubscriptionSnapshot(
+        string ProductId,
+        string? Name,
+        string? BillingPeriod,
+        List<AppStorePriceSnapshot> Prices);
+
+    private sealed record AppStorePriceSnapshot(
+        string RegionCode,
+        string CurrencyCode,
+        decimal? Price);
 
     private static string? ParseAppleBillingPeriod(string? period)
     {

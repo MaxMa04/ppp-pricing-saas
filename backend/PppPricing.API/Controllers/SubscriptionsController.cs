@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.IdentityModel.Tokens;
+using PppPricing.API.Configuration;
 using PppPricing.API.Data;
 using PppPricing.API.Services;
 using PppPricing.Domain.Models;
@@ -18,21 +19,24 @@ public class SubscriptionsController : ControllerBase
     private readonly ApplicationDbContext _context;
     private readonly ILogger<SubscriptionsController> _logger;
     private readonly HttpClient _httpClient;
-    private readonly IConfiguration _configuration;
+    private readonly GoogleOAuthSettingsResolver _googleOAuthSettings;
     private readonly ICredentialEncryptionService _encryptionService;
+    private readonly IEffectiveMultiplierService _effectiveMultiplierService;
 
     public SubscriptionsController(
         ApplicationDbContext context,
         ILogger<SubscriptionsController> logger,
         IHttpClientFactory httpClientFactory,
-        IConfiguration configuration,
-        ICredentialEncryptionService encryptionService)
+        GoogleOAuthSettingsResolver googleOAuthSettings,
+        ICredentialEncryptionService encryptionService,
+        IEffectiveMultiplierService effectiveMultiplierService)
     {
         _context = context;
         _logger = logger;
         _httpClient = httpClientFactory.CreateClient();
-        _configuration = configuration;
+        _googleOAuthSettings = googleOAuthSettings;
         _encryptionService = encryptionService;
+        _effectiveMultiplierService = effectiveMultiplierService;
     }
 
     private async Task<Guid?> GetUserIdAsync()
@@ -123,26 +127,24 @@ public class SubscriptionsController : ControllerBase
 
         if (subscription == null) return NotFound();
 
-        var pppMultipliers = await _context.PppMultipliers.ToDictionaryAsync(p => p.RegionCode, p => p.Multiplier);
-
-        var previews = subscription.Prices.Select(price =>
+        var suggestedRows = await BuildSuggestedPrices(subscription, userId.Value);
+        if (!suggestedRows.Success)
         {
-            var multiplier = pppMultipliers.GetValueOrDefault(price.RegionCode, 1.0m);
-            var suggestedPrice = price.CurrentPrice.HasValue
-                ? Math.Round(price.CurrentPrice.Value * multiplier, 2)
-                : (decimal?)null;
+            return BadRequest(new { error = suggestedRows.ErrorMessage });
+        }
 
-            return new
-            {
-                price.RegionCode,
-                price.CurrencyCode,
-                price.CurrentPrice,
-                SuggestedPrice = suggestedPrice,
-                Multiplier = multiplier,
-                Change = price.CurrentPrice.HasValue && suggestedPrice.HasValue
-                    ? Math.Round((double)((suggestedPrice.Value - price.CurrentPrice.Value) / price.CurrentPrice.Value * 100), 2)
-                    : (double?)null
-            };
+        var previews = suggestedRows.Rows.Select(row => new
+        {
+            row.Price.RegionCode,
+            row.Price.CurrencyCode,
+            row.Price.CurrentPrice,
+            SuggestedPrice = row.SuggestedPrice,
+            Multiplier = row.Multiplier,
+            row.IsFallback,
+            row.FallbackReason,
+            Change = row.Price.CurrentPrice.HasValue && row.SuggestedPrice.HasValue
+                ? Math.Round((double)((row.SuggestedPrice.Value - row.Price.CurrentPrice.Value) / row.Price.CurrentPrice.Value * 100), 2)
+                : (double?)null
         }).ToList();
 
         var increases = previews.Count(p => p.Change > 0);
@@ -208,31 +210,33 @@ public class SubscriptionsController : ControllerBase
         var app = subscription.App;
         var connection = app.StoreConnection;
 
-        // Get PPP multipliers for the app's preferred index type
-        var pppMultipliers = await _context.PppMultipliers
-            .Where(m => m.IndexType == app.PreferredIndexType)
-            .ToDictionaryAsync(p => p.RegionCode, p => p.Multiplier);
-
-        // Calculate suggested prices
-        var priceChanges = new List<PriceChangeResult>();
-        foreach (var price in subscription.Prices)
+        var suggestedRows = await BuildSuggestedPrices(subscription, userId.Value);
+        if (!suggestedRows.Success)
         {
-            var multiplier = pppMultipliers.GetValueOrDefault(price.RegionCode, 1.0m);
-            var suggestedPrice = price.CurrentPrice.HasValue
-                ? Math.Round(price.CurrentPrice.Value * multiplier, 2)
-                : (decimal?)null;
-
-            if (suggestedPrice.HasValue && price.CurrentPrice.HasValue && suggestedPrice != price.CurrentPrice)
-            {
-                priceChanges.Add(new PriceChangeResult
-                {
-                    RegionCode = price.RegionCode,
-                    CurrencyCode = price.CurrencyCode,
-                    OldPrice = price.CurrentPrice.Value,
-                    NewPrice = suggestedPrice.Value
-                });
-            }
+            return BadRequest(new { error = suggestedRows.ErrorMessage });
         }
+
+        var multiplierByNormalizedRegion = suggestedRows.Rows
+            .ToDictionary(
+                row => RegionCodeNormalizer.NormalizeToAlpha3(row.Price.RegionCode) ?? row.Price.RegionCode.ToUpperInvariant(),
+                row => row.Multiplier,
+                StringComparer.OrdinalIgnoreCase);
+
+        var priceChanges = suggestedRows.Rows
+            .Where(row => row.SuggestedPrice.HasValue &&
+                          row.Price.CurrentPrice.HasValue &&
+                          row.SuggestedPrice.Value != row.Price.CurrentPrice.Value)
+            .Select(row => new PriceChangeResult
+            {
+                RegionCode = row.Price.RegionCode,
+                CurrencyCode = row.Price.CurrencyCode,
+                OldPrice = row.Price.CurrentPrice!.Value,
+                NewPrice = row.SuggestedPrice!.Value,
+                Multiplier = row.Multiplier,
+                IsFallback = row.IsFallback,
+                FallbackReason = row.FallbackReason
+            })
+            .ToList();
 
         if (!priceChanges.Any())
         {
@@ -257,7 +261,8 @@ public class SubscriptionsController : ControllerBase
                 if (price != null)
                 {
                     price.PppSuggestedPrice = change.NewPrice;
-                    price.PppMultiplier = pppMultipliers.GetValueOrDefault(change.RegionCode, 1.0m);
+                    var normalizedRegion = RegionCodeNormalizer.NormalizeToAlpha3(change.RegionCode) ?? change.RegionCode.ToUpperInvariant();
+                    price.PppMultiplier = multiplierByNormalizedRegion.GetValueOrDefault(normalizedRegion, 1.0m);
                     price.LastUpdatedAt = DateTime.UtcNow;
                 }
             }
@@ -277,6 +282,9 @@ public class SubscriptionsController : ControllerBase
                     c.RegionCode,
                     c.OldPrice,
                     c.NewPrice,
+                    c.Multiplier,
+                    c.IsFallback,
+                    c.FallbackReason,
                     status = c.Status.ToString(),
                     c.ErrorMessage
                 })
@@ -287,6 +295,94 @@ public class SubscriptionsController : ControllerBase
             _logger.LogError(ex, "Error applying price changes for subscription {SubscriptionId}", id);
             return BadRequest(new { error = "Failed to apply price changes", details = ex.Message });
         }
+    }
+
+    private async Task<SuggestedPriceBuildResult> BuildSuggestedPrices(Subscription subscription, Guid userId)
+    {
+        if (subscription.Prices.Count == 0)
+        {
+            return new SuggestedPriceBuildResult
+            {
+                Success = false,
+                ErrorMessage = "No regional prices found for this subscription."
+            };
+        }
+
+        var usPriceEntry = subscription.Prices.FirstOrDefault(p =>
+            (RegionCodeNormalizer.NormalizeToAlpha3(p.RegionCode) ?? p.RegionCode.ToUpperInvariant()) == "USA" &&
+            p.CurrentPrice.HasValue);
+
+        if (usPriceEntry?.CurrentPrice == null)
+        {
+            return new SuggestedPriceBuildResult
+            {
+                Success = false,
+                ErrorMessage = "US base price is missing. Sync subscription prices first."
+            };
+        }
+
+        var usPriceInUsd = CurrencyConversion.Convert(
+            usPriceEntry.CurrentPrice.Value,
+            string.IsNullOrWhiteSpace(usPriceEntry.CurrencyCode) ? "USD" : usPriceEntry.CurrencyCode,
+            "USD");
+
+        var planType = subscription.App.PreferredIndexType == PricingIndexType.Netflix
+            ? subscription.App.PreferredNetflixPlan
+            : null;
+
+        var effectiveMultipliers = await _effectiveMultiplierService.ResolveForRegionsAsync(
+            subscription.Prices.Select(p => new EffectiveMultiplierInput(p.RegionCode, p.CurrencyCode)),
+            subscription.App.PreferredIndexType,
+            userId,
+            planType);
+
+        var rows = new List<SuggestedPriceRow>();
+        foreach (var price in subscription.Prices)
+        {
+            var normalizedRegion = RegionCodeNormalizer.NormalizeToAlpha3(price.RegionCode) ?? price.RegionCode.ToUpperInvariant();
+            var effective = effectiveMultipliers.GetValueOrDefault(normalizedRegion) ?? new EffectiveMultiplierResult
+            {
+                RegionCode = normalizedRegion,
+                Multiplier = 1.0m,
+                IsFallback = true,
+                FallbackReason = "default_1_0",
+                Source = "default"
+            };
+
+            decimal? suggestedPrice = null;
+            if (price.CurrentPrice.HasValue)
+            {
+                var targetCurrency = string.IsNullOrWhiteSpace(price.CurrencyCode) ? "USD" : price.CurrencyCode;
+                var pppUsdPrice = usPriceInUsd * effective.Multiplier;
+                suggestedPrice = RoundToLocalConvention(CurrencyConversion.Convert(pppUsdPrice, "USD", targetCurrency), targetCurrency);
+            }
+
+            rows.Add(new SuggestedPriceRow
+            {
+                Price = price,
+                Multiplier = effective.Multiplier,
+                SuggestedPrice = suggestedPrice,
+                IsFallback = effective.IsFallback,
+                FallbackReason = effective.FallbackReason
+            });
+        }
+
+        return new SuggestedPriceBuildResult
+        {
+            Success = true,
+            Rows = rows
+        };
+    }
+
+    private static decimal RoundToLocalConvention(decimal price, string currency)
+    {
+        var normalized = currency.Trim().ToUpperInvariant();
+        return normalized switch
+        {
+            "JPY" or "KRW" or "VND" or "IDR" => Math.Round(price, 0),
+            "TWD" or "CLP" or "COP" or "ARS" => Math.Round(price, 0),
+            _ => Math.Round(price, 2)
+        };
     }
 
     private async Task ApplyGooglePlayPrices(Subscription subscription, StoreConnection connection, List<PriceChangeResult> priceChanges, Guid userId)
@@ -342,7 +438,7 @@ public class SubscriptionsController : ControllerBase
             // Step 2: Update base plan prices
             var regionalConfigs = priceChanges.Select(change => new
             {
-                regionCode = change.RegionCode,
+                regionCode = RegionCodeNormalizer.NormalizeToAlpha2(change.RegionCode) ?? change.RegionCode,
                 price = new
                 {
                     currencyCode = change.CurrencyCode,
@@ -631,8 +727,8 @@ public class SubscriptionsController : ControllerBase
             return null;
         }
 
-        var clientId = _configuration["Google:ClientId"];
-        var clientSecret = _configuration["Google:ClientSecret"];
+        var clientId = _googleOAuthSettings.GetClientId();
+        var clientSecret = _googleOAuthSettings.GetClientSecret();
 
         if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
         {
@@ -702,7 +798,26 @@ public class SubscriptionsController : ControllerBase
         public string CurrencyCode { get; set; } = string.Empty;
         public decimal OldPrice { get; set; }
         public decimal NewPrice { get; set; }
+        public decimal Multiplier { get; set; }
+        public bool IsFallback { get; set; }
+        public string? FallbackReason { get; set; }
         public PriceChangeStatus Status { get; set; } = PriceChangeStatus.Pending;
         public string? ErrorMessage { get; set; }
+    }
+
+    private class SuggestedPriceBuildResult
+    {
+        public bool Success { get; set; }
+        public string? ErrorMessage { get; set; }
+        public List<SuggestedPriceRow> Rows { get; set; } = [];
+    }
+
+    private class SuggestedPriceRow
+    {
+        public SubscriptionPrice Price { get; set; } = null!;
+        public decimal? SuggestedPrice { get; set; }
+        public decimal Multiplier { get; set; }
+        public bool IsFallback { get; set; }
+        public string? FallbackReason { get; set; }
     }
 }

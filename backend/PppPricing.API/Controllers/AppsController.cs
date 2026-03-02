@@ -45,6 +45,8 @@ public class AppsController : ControllerBase
                 a.StoreType,
                 a.IconUrl,
                 a.CreatedAt,
+                a.PreferredIndexType,
+                a.PreferredNetflixPlan,
                 SubscriptionCount = a.Subscriptions.Count
             })
             .OrderByDescending(a => a.CreatedAt)
@@ -74,6 +76,7 @@ public class AppsController : ControllerBase
                 a.UpdatedAt,
                 PreferredIndexType = a.PreferredIndexType.ToString(),
                 PreferredIndexTypeValue = (int)a.PreferredIndexType,
+                a.PreferredNetflixPlan,
                 Subscriptions = a.Subscriptions.Select(s => new
                 {
                     s.Id,
@@ -160,6 +163,17 @@ public class AppsController : ControllerBase
         }
 
         app.PreferredIndexType = (PricingIndexType)request.PreferredIndexType;
+        if (app.PreferredIndexType == PricingIndexType.Netflix && !string.IsNullOrWhiteSpace(request.PreferredNetflixPlan))
+        {
+            var normalizedPlan = request.PreferredNetflixPlan.Trim().ToLowerInvariant();
+            if (normalizedPlan is not ("mobile" or "basic" or "standard" or "premium"))
+            {
+                return BadRequest(new { error = "Invalid Netflix plan. Use mobile, basic, standard, or premium." });
+            }
+
+            app.PreferredNetflixPlan = normalizedPlan;
+        }
+
         app.UpdatedAt = DateTime.UtcNow;
 
         await _context.SaveChangesAsync();
@@ -171,7 +185,8 @@ public class AppsController : ControllerBase
         {
             app.Id,
             PreferredIndexType = app.PreferredIndexType.ToString(),
-            PreferredIndexTypeValue = (int)app.PreferredIndexType
+            PreferredIndexTypeValue = (int)app.PreferredIndexType,
+            app.PreferredNetflixPlan
         });
     }
 }
@@ -179,4 +194,5 @@ public class AppsController : ControllerBase
 public class UpdatePreferredIndexRequest
 {
     public int PreferredIndexType { get; set; }
+    public string? PreferredNetflixPlan { get; set; }
 }
